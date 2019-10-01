@@ -1,0 +1,472 @@
+import matplotlib.pyplot as plt
+import time
+import os
+import shutil
+import copy
+from selenium import webdriver
+import pandas as pd
+
+
+def get_stock(ticker, refresh=True, folder='PythonCSV'):
+    # get csv data from yahoo finance and convert to dataframe. If refresh = false, will not download most recent data
+    file_path = '/Users/alejandroacosta/Documents/' + folder + '/' + ticker + '.csv'
+
+    def csv_to_df(csv_path):
+        # convert csv data from yahoo finance to dataframe for analysis
+        df = pd.read_csv(csv_path)
+        df.columns = [c.replace(' ', '_') for c in df.columns]
+        df['Date'] = pd.to_datetime(df['Date'], format='%Y-%m-%d')
+        return df
+
+    if refresh is False and os.path.exists(file_path):
+        # if refresh is false return last downloaded
+        return csv_to_df(file_path)
+    else:
+        chromedriver = '/Users/alejandroacosta/Documents/PyChrome/chromedriver'
+        url = 'https://finance.yahoo.com/quote/' + ticker + '/history?p=' + ticker
+        # xpaths used - way of identifying elements in a website
+        time_period_xpath = \
+            '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/div[1]/span[2]/span/input'
+        max_xpath = \
+            '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/div[1]/span[2]/div/div[1]/span[8]'
+        apply_xpath = '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/button'
+        download_xpath = '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[2]/span[2]/a/span'
+        driver = webdriver.Chrome(chromedriver)
+        driver.get(url)
+
+        def button_click(xpath):
+            # click on element in website through element xpath
+            element = driver.find_element_by_xpath(xpath)
+            element.click()
+
+        # Apply max historical data and download it
+        button_click(time_period_xpath)
+        button_click(max_xpath)
+        button_click(apply_xpath)
+        # Replace old ticker data if it already exists in destination folder
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        button_click(download_xpath)
+        time.sleep(5)
+        driver.quit()
+
+        def move_file():
+            # move file from downloads to python csv folder (have all stocks data in one place)
+            shutil.move('/Users/alejandroacosta/Downloads/' + ticker + '.csv', file_path)
+
+        move_file()
+
+        return csv_to_df(file_path)
+
+
+def date_format(date):
+    # format date to show as: '23 September 2019'
+    return date.strftime('%d ' '%B ' '%Y')
+
+
+def simple_moving_avg(df, length=20, src='Adj_Close'):
+    # calculate simple moving average
+    return df[src].rolling(window=length).mean()
+
+
+def exp_moving_avg(df, length=20, src='Adj_Close'):
+    # calculate exponential moving average
+    return df[src].ewm(span=length, adjust=False).mean()
+
+
+def rel_strength_index(df, length=14, src='Adj_Close'):
+    # calculate Relative Strength Index (RSI)
+    # find change from one tick to the next
+    delta = df[src].diff()
+    # create duplicates two duplicates of delta, and keep positive values in 'gain' and negative values in 'loss'
+    gain, loss = delta.copy(), delta.copy()
+    gain[gain < 0] = 0
+    loss[loss >= 0] = 0
+    # apply exponential moving average to gain and loss
+    avg_gain = exp_moving_avg(gain, length)
+    avg_loss = exp_moving_avg(loss.abs(), length)
+
+    rs = avg_gain / avg_loss
+    final = 100.0 - (100.0 / (1.0 + rs))
+    return final
+
+
+def bollinger_bands(df, length=20, st_dev=2., offset=0, src='Adj_Close'):
+    # calculate bollinger bands
+    basis = simple_moving_avg(df, length=length)
+    # find ROLLING standard deviation over specified length
+    sd = df[src].rolling(window=length).std(ddof=0)
+
+    basis = basis.shift(offset)
+    upper_band = basis + (sd * st_dev)
+    lower_band = basis - (sd * st_dev)
+
+    bb = pd.DataFrame({'Basis': basis, 'Upper Band': upper_band, 'Lower Band': lower_band})
+    return bb
+
+
+def MACD(df, fast_length=12, slow_length=26, src='Adj_Close', smoothing=9, simple_oscillator=False, simple_signal=False):
+    # calculate Moving Average Convergence / Divergence
+    fast_ma = exp_moving_avg(df, fast_length, src=src)
+    slow_ma = exp_moving_avg(df, slow_length, src=src)
+
+    if simple_oscillator is True:
+        fast_ma = simple_moving_avg(df, fast_length, src=src)
+        slow_ma = simple_moving_avg(df, slow_length, src=src)
+
+    macd = fast_ma - slow_ma
+    signal = macd.ewm(span=smoothing, adjust=False).mean()
+
+    if simple_signal is True:
+        signal = macd.rolling(span=smoothing, adjust=False).mean()
+
+    # Histogram of MACD - signal
+    hist = macd - signal
+
+    indicator = pd.DataFrame({'MACD': macd, 'Signal': signal, 'Hist': hist})
+    return indicator
+
+
+def hl2(df):
+    # average of high and low
+    return (df['High'] + df['Low']) / 2
+
+
+def hlc3(df):
+    # average of high, low, and close
+    return (df['High'] + df['Low'] + df['Close']) / 3
+
+
+def ohlc4(df):
+    # average of high, low, close, and open
+    return (df['High'] + df['Low'] + df['Close'] + df['Open']) / 4
+
+
+def stochastic(df, period_k=14, period_d=3, smooth=3):
+    low_low = df['Low'].rolling(window=period_k).min()
+    high_high = df['High'].rolling(window=period_k).max()
+    k = (((df['Adj_Close'] - low_low) * 100) / (high_high - low_low))
+    k = k.rolling(window=smooth).mean()
+    d = k.rolling(window=period_d).mean()
+    stoch = pd.DataFrame({'%K': k, '%D': d})
+    return stoch
+
+
+def obv(df):
+    OBV = [df.iloc[0]['Volume']]
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        if row['Adj_Close'] > df.iloc[i - 1]['Adj_Close']:
+            OBV.append(OBV[-1] + row['Volume'])
+        elif row['Adj_Close'] < df.iloc[i - 1]['Adj_Close']:
+            OBV.append(OBV[-1] - row['Volume'])
+        else:
+            OBV.append(OBV[-1])
+    return pd.Series(OBV)
+
+
+def parabolic_sar(df, start=0.02, accel=0.02, max_val=0.2):
+    # This is unfinished
+    psar = [df.iloc[0]['Low']]
+    ep = df.iloc[0]['High']
+    af = start
+    increment = (ep - psar[0]) * af
+    bull = True
+    reverse = False
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i - 1]
+        if bull:
+            psar.append(psar[i - 1] + increment)
+        else:
+            psar.append(psar[i - 1] - increment)
+        if bull:
+            if row['Low'] < psar[i]:
+                bull = False
+                reverse = True
+                af = start
+        else:
+            if row['High'] > psar[i]:
+                bull = True
+                reverse = True
+                af = start
+        if not reverse:
+            if bull:
+                if row['High'] > ep:
+                    ep = row['High']
+                    af = min(af + accel, max_val)
+                if prev['Low'] < psar[i]:
+                    psar[i] = prev['Low']
+            else:
+                if row['Low'] < ep:
+                    ep = row['Low']
+                    af = min(af + accel, max_val)
+                if prev['High'] > psar[i]:
+                    psar[i] = prev['High']
+    return pd.Series(psar)
+
+
+def cci(df, length=20):
+    tp = (df['High'] + df['Low'] + df['Adj_Close']) / 3
+    final = pd.Series((tp - tp.rolling(window=length).mean()) / (0.015 * tp.rolling(window=length).std()), name='CCI')
+    return final
+
+
+def ichimoku(df, conversion_period=9, base_period=26, lagging_periods=52, displ=26):
+    def donchian(period):
+        return (df['High'].rolling(window=period).max() + df['Low'].rolling(window=period).min()) / 2
+    conversion_line = donchian(conversion_period)
+    base_line = donchian(base_period)
+    ls_a = ((conversion_line + base_line) / 2).shift(displ)
+    ls_b = donchian(lagging_periods)
+    ichi_cloud = pd.DataFrame({'Conversion Line': conversion_line, 'Base Line': base_line,
+                              'Lead 1': ls_a, 'Lead 2': ls_b})
+    return ichi_cloud
+
+
+class Strategy(object):
+    def __init__(self, stocks):
+        self.stocks = stocks
+    pyramiding = False
+    shorting = False
+    default_qty_type = 'fixed'
+    default_qty_value = 1
+    initial_capital = 1000.
+    bars_back = 400
+    pl_ratio = 0.5
+
+    def formatting(self, x, sign='$', rounding=2):
+        # for faster visual understanding of data with units and rounding
+        if sign == '$':
+            x = str(round(x, rounding))
+            return sign + x
+        elif sign == '%':
+            x = str(round(x * 100, rounding))
+            return x + sign
+        else:
+            return str(round(x, rounding))
+
+    def stats(self, dataframe):
+        # calculation of various backtesting metrics
+        def trades(df):
+            trade = [list(), list(), 0, 0]
+            all_trades = list()
+
+            def add_trade(shares_change, day, price, shares_added):
+                if shares_change > 0:
+                    trade[0].append(day)
+                    trade[1].append(price)
+                    trade[2] = shares_added
+                elif shares_change < 0:
+                    trade[0].append(day)
+                    trade[1].append(price)
+                    trade[3] = (trade[1][1] - trade[1][0]) * trade[2]
+                if len(trade[0]) == 2:
+                    all_trades.append(copy.deepcopy(trade))
+                    for y in range(len(trade)):
+                        if y < 2:
+                            trade[y].clear()
+
+            for i in range(len(df)):
+                add_trade(df['Change in Shares'].iloc[i], df['Date'].iloc[i], df['Adj_Close'].iloc[i],
+                          df['Shares'].iloc[i])
+
+            return all_trades
+
+        def profits(trades_array):
+            lst = list()
+            for i in trades_array:
+                lst.append(i[3])
+            return lst
+
+        # for when profits need to be accessed as a list or as a series
+        profits_lst = profits(trades(dataframe))
+        profits_ser = pd.Series(profits_lst)
+
+        def pct_win():
+            win_count = profits_ser[lambda x: x > 0].count()
+            return win_count / len(profits_ser)
+
+        def gross_profit():
+            return profits_ser[lambda x: x > 0].sum()
+
+        def gross_loss():
+            return profits_ser[lambda x: x <= 0].sum()
+
+        def net_profit():
+            return gross_profit() + gross_loss()
+
+        def avg_profit_trade():
+            return profits_ser.mean()
+
+        def median_profit_trade():
+            return profits_ser.median()
+
+        def largest_loss():
+            return profits_ser.min()
+
+        def largest_gain():
+            return profits_ser.max()
+
+        def profit_factor():
+            return gross_profit() / abs(gross_loss())
+
+        def outlier_adj_pf(top=1):
+            if top == 0:
+                sorted_profits = profits_ser.sort_values()
+            else:
+                sorted_profits = profits_ser.sort_values()[:(-1 * top)]
+            return sorted_profits[lambda x: x > 0].sum() / abs(sorted_profits[lambda x: x <= 0].sum())
+
+        def streaks(winners=True):
+            streak = list()
+            all_streaks = list()
+            for x in profits_lst:
+                if winners:
+                    if x >= 0:
+                        streak.append(x)
+                    else:
+                        if streak:
+                            all_streaks.append(streak[:])
+                        streak.clear()
+                else:
+                    if x < 0:
+                        streak.append(x)
+                    else:
+                        if streak:
+                            all_streaks.append(streak[:])
+                        streak.clear()
+            return all_streaks
+
+        def max_consec_winners():
+            return max([len(y) for y in streaks()])
+
+        def max_consec_losers():
+            return max([len(y) for y in streaks(winners=False)])
+
+        def max_drawdown():
+            drawdown = [0]
+            for i in range(1, len(dataframe['Portfolio'])):
+                balance = dataframe['Portfolio'].iloc[i]
+                drawdown.append(balance / max(dataframe['Portfolio'].iloc[:i]) - 1)
+            return min(drawdown)
+
+        def max_win_streak_gain():
+            return max([sum(z) for z in streaks() if len(z) == max_consec_winners()])
+
+        def max_loss_streak_loss():
+            try:
+                return min([sum(z) for z in streaks(winners=False) if len(z) == max_consec_losers()])
+            except ValueError:
+                print('\nIn "max_loss_streak_loss()": min() arg is empty\n')
+                return 0
+
+        statistics = [pct_win(), gross_profit(), gross_loss(), net_profit(), avg_profit_trade(), median_profit_trade(),
+                      largest_gain(), largest_loss(), profit_factor(), outlier_adj_pf(), max_consec_winners(),
+                      max_consec_losers(), max_win_streak_gain(), max_loss_streak_loss(), max_drawdown()]
+        max_drawdown()
+        return pd.Series(statistics)
+
+    def double_sma_crossover(self, hist_data):
+        s_sma_len = 10
+        l_sma_len = 20
+        max_indicator_len = max(s_sma_len, l_sma_len)
+
+        balance = self.initial_capital
+        change_in_shares = list()
+        shares_out = list()
+        portfolio = list()
+        df = hist_data.iloc[len(hist_data) - self.bars_back - max_indicator_len : len(hist_data)].reset_index()
+
+        short_sma = simple_moving_avg(df, length=s_sma_len)
+        long_sma = simple_moving_avg(df, length=l_sma_len)
+
+        def entry(qty=self.default_qty_value, order_type='Market', long_when=True, short_when=False):
+            if long_when and not short_when:
+                if self.pyramiding is False and self.shorting is False:
+                    if order_type == 'Market':
+                         return qty
+            else:
+                return 0
+
+
+        for i in range(len(df)):
+            close = df['Adj_Close'].iloc[i]
+            # buy when short mov avg crosses over long mov avg. Sell when short dips below long sma
+            shares_out.append(entry(long_when=(short_sma.iloc[i] > long_sma.iloc[i]),
+                                    short_when=(short_sma.iloc[i] <= long_sma.iloc[i])))
+
+            shares = shares_out[-1]
+            if i == 0:
+                change = shares - 0
+            else:
+                change = shares - shares_out[-2]
+            change_in_shares.append(change)
+            balance -= (change * close)
+            portfolio.append(balance + (shares * close))
+        return pd.DataFrame({'Date': df['Date'], 'Adj_Close': df['Adj_Close'],
+                             'Portfolio': portfolio, 'Shares': shares_out, 'Change in Shares': change_in_shares})
+
+    def sma_crossover(self, hist_data):
+        sma_len = 20
+        max_indicator_len = sma_len
+
+        balance = self.initial_capital
+        change_in_shares = list()
+        shares_out = list()
+        portfolio = list()
+        df = hist_data.iloc[len(hist_data) - self.bars_back - max_indicator_len : len(hist_data)].reset_index()
+
+        sma = simple_moving_avg(df, length=sma_len)
+
+        def entry(qty=self.default_qty_value, order_type='Market', long_when=True, short_when=False):
+            if long_when and not short_when:
+                if self.pyramiding is False and self.shorting is False:
+                    if order_type == 'Market':
+                         return qty
+            else:
+                return 0
+
+
+        for i in range(len(df)):
+            close = df['Adj_Close'].iloc[i]
+            shares_out.append(entry(long_when=(close > sma.iloc[i]), short_when=(close <= sma.iloc[i])))
+            shares = shares_out[-1]
+            if i == 0:
+                change = shares - 0
+            else:
+                change = shares - shares_out[-2]
+            change_in_shares.append(change)
+            balance -= (change * close)
+            portfolio.append(balance + (shares * close))
+        return pd.DataFrame({'Date': df['Date'], 'Adj_Close': df['Adj_Close'],
+                             'Portfolio': portfolio, 'Shares': shares_out, 'Change in Shares': change_in_shares})
+
+    def strat_performance_avg(self, strat):
+        perf = pd.DataFrame(index=['Percent Wins', 'Gross Profit', 'Gross Loss', 'Total Net Profit',
+                                   'Avg Profit per Trade', 'Median Profit per Trade', 'Largest Single Winning Trade',
+                                   'Largest Single Losing Trade', 'Profit Factor', 'Outlier Adjusted Profit Factor',
+                                   'Largest Win Streak', 'Largest Losing Streak', 'Gain during Max Win Streak',
+                                   'Loss during Max Losing Streak', 'Maximum Drawdown %'])
+        for i in self.stocks:
+            if strat == 'double sma crossover':
+                perf[i] = self.stats(self.double_sma_crossover(self.stocks[i])).values
+            elif strat == 'sma crossover':
+                perf[i] = self.stats(self.sma_crossover(self.stocks[i])).values
+        perf['Average'] = perf.mean(axis=1)
+        return perf
+
+    def strat_compare(self, stats1, stats2, strat1_name, strat2_name):
+        comparison = pd.DataFrame()
+        comparison[strat1_name] = stats1['Average']
+        comparison[strat2_name] = stats2['Average']
+        # comparison['% Change'] = ((comparison[strat2_name] - comparison[strat1_name]) / comparison[strat1_name]) * 100
+        # comparison['% Change'] = comparison['% Change'].apply(int)
+        return comparison
+
+
+stock = {'INTC': get_stock('INTC', refresh=False)}
+test = Strategy(stock)
+dsc_name = 'double sma crossover'
+sc_name = 'sma crossover'
+print(test.strat_compare(test.strat_performance_avg(sc_name), test.strat_performance_avg(dsc_name), sc_name, dsc_name))
