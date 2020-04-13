@@ -1,80 +1,32 @@
 import matplotlib.pyplot as plt
-import time
-import os
-import shutil
-import copy
-from selenium import webdriver
+import yfinance as yf
 import pandas as pd
+import numpy as np
+from copy import deepcopy
+from pandas.plotting import register_matplotlib_converters
+
+register_matplotlib_converters()
 
 
-def get_stock(ticker, refresh=True, folder='PythonCSV'):
-    # get csv data from yahoo finance and convert to dataframe. If refresh = false, will not download most recent data
-    file_path = '/Users/alejandroacosta/Documents/' + folder + '/' + ticker + '.csv'
-
-    def csv_to_df(csv_path):
-        # convert csv data from yahoo finance to dataframe for analysis
-        df = pd.read_csv(csv_path)
-        df.columns = [c.replace(' ', '_') for c in df.columns]
-        df['Date'] = pd.to_datetime(df['Date'], format='%Y-%m-%d')
-        return df
-
-    if refresh is False and os.path.exists(file_path):
-        # if refresh is false return last downloaded
-        return csv_to_df(file_path)
-    else:
-        chromedriver = '/Users/alejandroacosta/Documents/PyChrome/chromedriver'
-        url = 'https://finance.yahoo.com/quote/' + ticker + '/history?p=' + ticker
-        # xpaths used - way of identifying elements in a website
-        time_period_xpath = \
-            '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/div[1]/span[2]/span/input'
-        max_xpath = \
-            '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/div[1]/span[2]/div/div[1]/span[8]'
-        apply_xpath = '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[1]/button'
-        download_xpath = '//*[@id="Col1-1-HistoricalDataTable-Proxy"]/section/div[1]/div[2]/span[2]/a/span'
-        driver = webdriver.Chrome(chromedriver)
-        driver.get(url)
-
-        def button_click(xpath):
-            # click on element in website through element xpath
-            element = driver.find_element_by_xpath(xpath)
-            element.click()
-
-        # Apply max historical data and download it
-        button_click(time_period_xpath)
-        button_click(max_xpath)
-        button_click(apply_xpath)
-        # Replace old ticker data if it already exists in destination folder
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        button_click(download_xpath)
-        time.sleep(5)
-        driver.quit()
-
-        def move_file():
-            # move file from downloads to python csv folder (have all stocks data in one place)
-            shutil.move('/Users/alejandroacosta/Downloads/' + ticker + '.csv', file_path)
-
-        move_file()
-
-        return csv_to_df(file_path)
-
-
-def date_format(date):
-    # format date to show as: '23 September 2019'
-    return date.strftime('%d ' '%B ' '%Y')
-
-
-def simple_moving_avg(df, length=20, src='Adj_Close'):
+# Lines 11-139 are functions that return a technical indicator in the form of a Series
+def simple_moving_avg(df, length=20, src='Close'):
     # calculate simple moving average
     return df[src].rolling(window=length).mean()
 
 
-def exp_moving_avg(df, length=20, src='Adj_Close'):
+def exp_moving_avg(df, length=20, src='Close'):
     # calculate exponential moving average
     return df[src].ewm(span=length, adjust=False).mean()
 
 
-def rel_strength_index(df, length=14, src='Adj_Close'):
+def volume_weighted_mov_avg(df, length=20, src='Close'):
+    # volume times price
+    vol_price = df[src] * df['Volume']
+    # rolling weighted average
+    return vol_price.rolling(window=length).sum() / df['Volume'].rolling(window=length).sum()
+
+
+def rel_strength_index(df, length=14, src='Close'):
     # calculate Relative Strength Index (RSI)
     # find change from one tick to the next
     delta = df[src].diff()
@@ -83,15 +35,15 @@ def rel_strength_index(df, length=14, src='Adj_Close'):
     gain[gain < 0] = 0
     loss[loss >= 0] = 0
     # apply exponential moving average to gain and loss
-    avg_gain = exp_moving_avg(gain, length)
-    avg_loss = exp_moving_avg(loss.abs(), length)
+    avg_gain = gain.ewm(span=length, adjust=False).mean()
+    avg_loss = loss.abs().ewm(span=length, adjust=False).mean()
 
     rs = avg_gain / avg_loss
     final = 100.0 - (100.0 / (1.0 + rs))
     return final
 
 
-def bollinger_bands(df, length=20, st_dev=2., offset=0, src='Adj_Close'):
+def bollinger_bands(df, length=20, st_dev=2., offset=0, src='Close'):
     # calculate bollinger bands
     basis = simple_moving_avg(df, length=length)
     # find ROLLING standard deviation over specified length
@@ -105,14 +57,14 @@ def bollinger_bands(df, length=20, st_dev=2., offset=0, src='Adj_Close'):
     return bb
 
 
-def MACD(df, fast_length=12, slow_length=26, src='Adj_Close', smoothing=9, simple_oscillator=False, simple_signal=False):
+def MACD(df, fast_length=12, slow_length=26, src='Close', smoothing=9, simple_oscillator=False, simple_signal=False):
     # calculate Moving Average Convergence / Divergence
-    fast_ma = exp_moving_avg(df, fast_length, src=src)
-    slow_ma = exp_moving_avg(df, slow_length, src=src)
+    fast_ma = exp_moving_avg(df, length=fast_length, src=src)
+    slow_ma = exp_moving_avg(df, length=slow_length, src=src)
 
     if simple_oscillator is True:
-        fast_ma = simple_moving_avg(df, fast_length, src=src)
-        slow_ma = simple_moving_avg(df, slow_length, src=src)
+        fast_ma = simple_moving_avg(df, length=fast_length, src=src)
+        slow_ma = simple_moving_avg(df, length=slow_length, src=src)
 
     macd = fast_ma - slow_ma
     signal = macd.ewm(span=smoothing, adjust=False).mean()
@@ -143,9 +95,10 @@ def ohlc4(df):
 
 
 def stochastic(df, period_k=14, period_d=3, smooth=3):
+    # calculates stochastics
     low_low = df['Low'].rolling(window=period_k).min()
     high_high = df['High'].rolling(window=period_k).max()
-    k = (((df['Adj_Close'] - low_low) * 100) / (high_high - low_low))
+    k = (((df['Close'] - low_low) * 100) / (high_high - low_low))
     k = k.rolling(window=smooth).mean()
     d = k.rolling(window=period_d).mean()
     stoch = pd.DataFrame({'%K': k, '%D': d})
@@ -156,59 +109,18 @@ def obv(df):
     OBV = [df.iloc[0]['Volume']]
     for i in range(1, len(df)):
         row = df.iloc[i]
-        if row['Adj_Close'] > df.iloc[i - 1]['Adj_Close']:
+        if row['Close'] > df.iloc[i - 1]['Close']:
             OBV.append(OBV[-1] + row['Volume'])
-        elif row['Adj_Close'] < df.iloc[i - 1]['Adj_Close']:
+        elif row['Close'] < df.iloc[i - 1]['Close']:
             OBV.append(OBV[-1] - row['Volume'])
         else:
             OBV.append(OBV[-1])
     return pd.Series(OBV)
 
 
-def parabolic_sar(df, start=0.02, accel=0.02, max_val=0.2):
-    # This is unfinished
-    psar = [df.iloc[0]['Low']]
-    ep = df.iloc[0]['High']
-    af = start
-    increment = (ep - psar[0]) * af
-    bull = True
-    reverse = False
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i - 1]
-        if bull:
-            psar.append(psar[i - 1] + increment)
-        else:
-            psar.append(psar[i - 1] - increment)
-        if bull:
-            if row['Low'] < psar[i]:
-                bull = False
-                reverse = True
-                af = start
-        else:
-            if row['High'] > psar[i]:
-                bull = True
-                reverse = True
-                af = start
-        if not reverse:
-            if bull:
-                if row['High'] > ep:
-                    ep = row['High']
-                    af = min(af + accel, max_val)
-                if prev['Low'] < psar[i]:
-                    psar[i] = prev['Low']
-            else:
-                if row['Low'] < ep:
-                    ep = row['Low']
-                    af = min(af + accel, max_val)
-                if prev['High'] > psar[i]:
-                    psar[i] = prev['High']
-    return pd.Series(psar)
-
-
 def cci(df, length=20):
-    tp = (df['High'] + df['Low'] + df['Adj_Close']) / 3
-    final = pd.Series((tp - tp.rolling(window=length).mean()) / (0.015 * tp.rolling(window=length).std()), name='CCI')
+    tp = (df['High'] + df['Low'] + df['Close']) / 3
+    final = pd.Series((tp - tp.rolling(window=length).mean()) / (0.015 * tp.rolling(window=length).std()))
     return final
 
 
@@ -218,255 +130,511 @@ def ichimoku(df, conversion_period=9, base_period=26, lagging_periods=52, displ=
     conversion_line = donchian(conversion_period)
     base_line = donchian(base_period)
     ls_a = ((conversion_line + base_line) / 2).shift(displ)
-    ls_b = donchian(lagging_periods)
+    ls_b = donchian(lagging_periods).shift(displ)
+    lagging = df['Close'].shift(-1 * displ)
     ichi_cloud = pd.DataFrame({'Conversion Line': conversion_line, 'Base Line': base_line,
-                              'Lead 1': ls_a, 'Lead 2': ls_b})
+                              'Lead 1': ls_a, 'Lead 2': ls_b, 'Lagging': lagging})
     return ichi_cloud
 
 
-class Strategy(object):
+def p_sar(df, accel=0.02, max_val=0.2):
+    length = len(df)
+    high = list(df['High'])
+    low = list(df['Low'])
+    close = list(df['Close'])
+    psar = close[0:length]
+    bull = True
+    af = accel
+    hp = high[0]
+    lp = low[0]
+
+    for i in range(1, length):
+        if bull:
+            psar[i] = psar[i - 1] + af * (hp - psar[i - 1])
+        else:
+            psar[i] = psar[i - 1] + af * (lp - psar[i - 1])
+
+        reverse = False
+
+        if bull:
+            if low[i] < psar[i]:
+                bull = False
+                reverse = True
+                psar[i] = hp
+                lp = low[i]
+                af = accel
+        else:
+            if high[i] > psar[i]:
+                bull = True
+                reverse = True
+                psar[i] = lp
+                hp = high[i]
+                af = accel
+
+        if not reverse:
+            if bull:
+                if high[i] > hp:
+                    hp = high[i]
+                    af = min(af + accel, max_val)
+                if low[i - 1] < psar[i]:
+                    psar[i] = low[i - 1]
+                if low[i - 2] < psar[i]:
+                    psar[i] = low[i - 2]
+            else:
+                if low[i] < lp:
+                    lp = low[i]
+                    af = min(af + accel, max_val)
+                if high[i - 1] > psar[i]:
+                    psar[i] = high[i - 1]
+                if high[i - 2] > psar[i]:
+                    psar[i] = high[i - 2]
+
+    return pd.Series(psar)
+
+
+class Quant_old(object):
     def __init__(self, stocks):
         self.stocks = stocks
-    pyramiding = False
-    shorting = False
     default_qty_type = 'fixed'
-    default_qty_value = 1
-    initial_capital = 1000.
-    bars_back = 400
-    pl_ratio = 0.5
+    default_qty_value = 10
+    initial_capital = 500.
+    shorting = False
 
-    def formatting(self, x, sign='$', rounding=2):
-        # for faster visual understanding of data with units and rounding
-        if sign == '$':
-            x = str(round(x, rounding))
-            return sign + x
-        elif sign == '%':
-            x = str(round(x * 100, rounding))
-            return x + sign
-        else:
-            return str(round(x, rounding))
+    def Strategy(self, strat='Double SMA Crossover'):
+        change_in_positions, positions, unrealized_wealth, trades, trade = (list() for i in range(5))
+        metrics = ['Total # of Trades', 'Return %', 'Percent Wins', 'Win / Loss Ratio', 'Gross Profit',
+                   'Gross Loss', 'Net Profit', 'Buy and Hold Return', 'Payout Ratio', 'Average Profit / Trade',
+                   'Median Profit / Trade', 'Largest Gain', 'Largest Loss', 'Profit Factor', 'Max Drawdown',
+                   'Max Drawdown %', 'Outlier Adj Profit Factor', 'Sharpe Ratio', 'Sortino Ratio',
+                   'Max Consecutive Winners', 'Max Consecutive Losers']
 
-    def stats(self, dataframe):
-        # calculation of various backtesting metrics
-        def trades(df):
-            trade = [list(), list(), 0, 0]
-            all_trades = list()
+        def backtest(stock):
+            balance = self.initial_capital
+            for i in range(len(stock)):
+                close = stock['Close'].iloc[i]
 
-            def add_trade(shares_change, day, price, shares_added):
-                if shares_change > 0:
-                    trade[0].append(day)
-                    trade[1].append(price)
-                    trade[2] = shares_added
-                elif shares_change < 0:
-                    trade[0].append(day)
-                    trade[1].append(price)
-                    trade[3] = (trade[1][1] - trade[1][0]) * trade[2]
-                if len(trade[0]) == 2:
-                    all_trades.append(copy.deepcopy(trade))
-                    for y in range(len(trade)):
-                        if y < 2:
-                            trade[y].clear()
-
-            for i in range(len(df)):
-                add_trade(df['Change in Shares'].iloc[i], df['Date'].iloc[i], df['Adj_Close'].iloc[i],
-                          df['Shares'].iloc[i])
-
-            return all_trades
-
-        def profits(trades_array):
-            lst = list()
-            for i in trades_array:
-                lst.append(i[3])
-            return lst
-
-        # for when profits need to be accessed as a list or as a series
-        profits_lst = profits(trades(dataframe))
-        profits_ser = pd.Series(profits_lst)
-
-        def pct_win():
-            win_count = profits_ser[lambda x: x > 0].count()
-            return win_count / len(profits_ser)
-
-        def gross_profit():
-            return profits_ser[lambda x: x > 0].sum()
-
-        def gross_loss():
-            return profits_ser[lambda x: x <= 0].sum()
-
-        def net_profit():
-            return gross_profit() + gross_loss()
-
-        def avg_profit_trade():
-            return profits_ser.mean()
-
-        def median_profit_trade():
-            return profits_ser.median()
-
-        def largest_loss():
-            return profits_ser.min()
-
-        def largest_gain():
-            return profits_ser.max()
-
-        def profit_factor():
-            return gross_profit() / abs(gross_loss())
-
-        def outlier_adj_pf(top=1):
-            if top == 0:
-                sorted_profits = profits_ser.sort_values()
-            else:
-                sorted_profits = profits_ser.sort_values()[:(-1 * top)]
-            return sorted_profits[lambda x: x > 0].sum() / abs(sorted_profits[lambda x: x <= 0].sum())
-
-        def streaks(winners=True):
-            streak = list()
-            all_streaks = list()
-            for x in profits_lst:
-                if winners:
-                    if x >= 0:
-                        streak.append(x)
+                def entry(qty=self.default_qty_value, long=True, when=True, close_when=True):
+                    if long:
+                        if when:
+                            return qty
+                        elif close_when and trade is True:
+                            return qty * -1
+                        else:
+                            return 0
                     else:
-                        if streak:
-                            all_streaks.append(streak[:])
-                        streak.clear()
+                        pass
+
+                # As function iterates over historical data, determine whether to increase or decrease position size
+                # based on strategy selected
+
+                if strat == 'Double SMA Crossover':
+                    short_sma = simple_moving_avg(stock, length=10)
+                    long_sma = simple_moving_avg(stock, length=20)
+                    positions.append(entry(when=(short_sma.iloc[i] > long_sma.iloc[i]),
+                                     close_when=(long_sma.iloc[i] <= short_sma.iloc[i])))
+
+                if strat == 'Ichimoku':
+                    disp = 26
+                    ichi_cloud = ichimoku(stock, displ=disp)
+                    rsi = rel_strength_index(stock).iloc[i]
+
+                    lead_1 = ichi_cloud['Lead 1']
+                    lead_2 = ichi_cloud['Lead 2']
+                    conversion = ichi_cloud['Conversion Line'].iloc[i]
+                    base = ichi_cloud['Base Line'].iloc[i]
+                    lagging = ichi_cloud['Lagging']
+
+                    # price is above the cloud
+                    rule_1 = (close > max(lead_1.iloc[i], lead_2.iloc[i]))
+                    # 'TK Crossover' - conversion line crosses over base line
+                    rule_2 = (conversion > base)
+                    # cloud ahead must be bullish cloud - lead 1 is over lead 2
+                    rule_3 = (lead_1.iloc[i] > lead_2.iloc[i])
+                    # Lagging span is greater than the cloud
+                    rule_4 = (lagging.iloc[i - disp] > max(lead_1.iloc[i - disp], lead_2.iloc[i - disp]))
+
+                    # price is below the cloud
+                    rule_5 = (close < min(lead_1.iloc[i], lead_2.iloc[i]))
+                    # 'TK Crossover' - base line crosses over conversion line
+                    rule_6 = (base > conversion)
+
+                    buy_signal = rule_1 and rule_2 and rule_3 and rule_4
+                    sell_signal = rule_5 or rule_6
+
+                    positions.append(entry(when=buy_signal, close_when=sell_signal))
+
+                if strat == 'RSI 2':
+                    rsi = rel_strength_index(stock, length=2).iloc[i]
+                    sma_200 = simple_moving_avg(stock, length=200).iloc[i]
+                    sma_10 = simple_moving_avg(stock, length=10).iloc[i]
+                    oversold = (rsi < 5)
+
+                    buy_signal = ((close > sma_200) and oversold)
+                    sell_signal = (close > sma_10)
+                    positions.append(entry(when=buy_signal, close_when=sell_signal))
+
+                if strat == 'PSAR & MACD':
+                    macd = MACD(stock)['Hist'].iloc[i]
+                    psar = p_sar(stock, accel=0.01).iloc[i]
+
+                    # MACD crossover
+                    rule_1 = (macd > 0)
+                    # parabolic sar is below price
+                    rule_2 = (psar < close)
+
+                    buy_signal = rule_1 and rule_2
+                    sell_signal = (not rule_1) and (not rule_2)
+                    positions.append(entry(when=buy_signal, close_when=sell_signal))
+
+                current_pos = positions[-1]
+                if i == 0:
+                    # if strategy needs to increase position size immediately,
+                    # then the change in shares is the difference between the position size and 0
+                    change = current_pos - 0
                 else:
-                    if x < 0:
-                        streak.append(x)
+                    # otherwise determine the change in shares from the previous position
+                    change = current_pos - positions[-2]
+
+                change_in_positions.append(change)
+                balance -= (change * close)
+                unrealized_wealth.append(balance + (current_pos * close))
+
+            portfolio = pd.DataFrame({'Date': stock['Date'], 'Close': stock['Close'],
+                                      'Unrealized Wealth': unrealized_wealth, 'Balance': balance, 'Position': positions,
+                                      'Change in Position': change_in_positions})
+            portfolio['Returns'] = portfolio['Unrealized Wealth'].pct_change()
+            # plt.plot(portfolio['Unrealized Wealth'])
+            # plt.show()
+
+            def return_trades(df):
+                for y in range(len(df)):
+                    pos_change = df['Change in Position'].iloc[y]
+                    if pos_change != 0:
+                        # log changes in position size to list "trade".
+                        # If closing out a trade, append trade to trades list and start over
+                        trade.append([df['Date'].iloc[y], df['Close'].iloc[y], df['Position'].iloc[y],
+                                      df['Change in Position'].iloc[y], df['Unrealized Wealth'].iloc[y]])
+                        if df['Position'].iloc[y] == 0:
+                            profit = trade[-1][4] - trade[0][4]
+                            trade.append(profit)
+                            trade.append(profit / trade[0][4])
+                            trades.append(deepcopy(trade))
+                            trade.clear()
+                return trades
+
+            def analysis(trade_lst, risk_free_rate=0.0005):
+                def profits():
+                    lst = list()
+                    for j in trade_lst:
+                        lst.append(j[2])
+                    return lst
+                profits_ser = pd.Series(profits())
+                profits_lst = profits()
+                pnl = portfolio['Unrealized Wealth']
+
+                def portfolio_return_pct():
+                    return (pnl.iloc[-1] - pnl.iloc[0]) / pnl.iloc[0]
+
+                def total_trades():
+                    # number of trades executed
+                    return profits_ser.count()
+
+                def pct_win():
+                    # % of profitable trades out of the total number of trades
+                    win_count = profits_ser[lambda x: x > 0].count()
+                    return win_count / len(profits_ser)
+
+                def win_loss_ratio():
+                    # How many profitable trades per one losing trade
+                    return profits_ser[lambda x: x > 0].count() / profits_ser[lambda x: x < 0].count()
+
+                def payout_ratio():
+                    # average profit / average loss
+                    avg_win = profits_ser[lambda x: x > 0].mean()
+                    avg_loss = profits_ser[lambda x: x < 0].mean()
+                    return avg_win / abs(avg_loss)
+
+                def buy_and_hold():
+                    return (stock['Close'].iloc[-1] * self.default_qty_value) - \
+                           (stock['Close'].iloc[0] * self.default_qty_value)
+
+                def gross_profit():
+                    return profits_ser[lambda x: x > 0].sum()
+
+                def gross_loss():
+                    return profits_ser[lambda x: x <= 0].sum()
+
+                def net_profit():
+                    return gross_profit() + gross_loss()
+
+                def avg_profit_trade():
+                    return profits_ser.mean()
+
+                def median_profit_trade():
+                    return profits_ser.median()
+
+                def largest_loss():
+                    return profits_ser.min()
+
+                def largest_gain():
+                    return profits_ser.max()
+
+                def profit_factor():
+                    # gross profit / gross loss
+                    # For every $1 invested, you can expect $x back
+                    return gross_profit() / abs(gross_loss())
+
+                def outlier_adj_pf(top=1):
+                    # same concept as profit factor, but excluding the most extreme profitable value
+                    if top == 0:
+                        sorted_profits = profits_ser.sort_values()
                     else:
-                        if streak:
-                            all_streaks.append(streak[:])
-                        streak.clear()
-            return all_streaks
+                        sorted_profits = profits_ser.sort_values()[:(-1 * top)]
+                    return sorted_profits[lambda x: x > 0].sum() / abs(sorted_profits[lambda x: x <= 0].sum())
 
-        def max_consec_winners():
-            return max([len(y) for y in streaks()])
+                def streaks(winners=True):
+                    streak = 0
+                    all_streaks = list()
+                    for x in profits_lst:
+                        if winners:
+                            if x > 0:
+                                streak += 1
+                            else:
+                                all_streaks.append(streak)
+                                streak = 0
+                        else:
+                            if x < 0:
+                                streak += 1
+                            else:
+                                all_streaks.append(streak)
+                                streak = 0
+                    return max(all_streaks) if (max(all_streaks) > 1) else 0
 
-        def max_consec_losers():
-            return max([len(y) for y in streaks(winners=False)])
+                def max_drawdown(percentage=True):
+                    # maximum loss from peak to a trough in a portfolio
+                    # can be expressed in percentage or dollar terms
+                    mdd = 0
+                    peak = pnl[0]
+                    for x in range(1, len(pnl)):
+                        if pnl.iloc[x] > peak:
+                            peak = pnl.iloc[x]
+                        if percentage:
+                            dd = (peak - pnl.iloc[x]) / peak
+                        else:
+                            dd = peak - pnl.iloc[x]
+                        if dd > mdd:
+                            mdd = dd
+                    return mdd
 
-        def max_drawdown():
-            drawdown = [0]
-            for i in range(1, len(dataframe['Portfolio'])):
-                balance = dataframe['Portfolio'].iloc[i]
-                drawdown.append(balance / max(dataframe['Portfolio'].iloc[:i]) - 1)
-            return min(drawdown)
+                def sharpe_ratio():
+                    # (portfolio return - risk free return) / st dev of portfolio
+                    # Risk free rate as of 2019 = 0.05 %
+                    excess_returns = portfolio['Returns'] - risk_free_rate
+                    return excess_returns.mean() / excess_returns.std()
 
-        def max_win_streak_gain():
-            return max([sum(z) for z in streaks() if len(z) == max_consec_winners()])
+                def sortino_ratio():
+                    # (portfolio return - risk free rate) / portfolio downside st dev
+                    excess_returns = portfolio['Returns'] - risk_free_rate
+                    return excess_returns.mean() / excess_returns[lambda x: x < 0].std()
 
-        def max_loss_streak_loss():
-            try:
-                return min([sum(z) for z in streaks(winners=False) if len(z) == max_consec_losers()])
-            except ValueError:
-                print('\nIn "max_loss_streak_loss()": min() arg is empty\n')
-                return 0
+                specs = [total_trades(), portfolio_return_pct(), pct_win(), win_loss_ratio(), gross_profit(),
+                         gross_loss(), net_profit(), buy_and_hold(), payout_ratio(), avg_profit_trade(), median_profit_trade(),
+                         largest_gain(), largest_loss(), profit_factor(), max_drawdown(percentage=False), max_drawdown(),
+                         outlier_adj_pf(), sharpe_ratio(), sortino_ratio(), streaks(), streaks(winners=False)]
 
-        statistics = [pct_win(), gross_profit(), gross_loss(), net_profit(), avg_profit_trade(), median_profit_trade(),
-                      largest_gain(), largest_loss(), profit_factor(), outlier_adj_pf(), max_consec_winners(),
-                      max_consec_losers(), max_win_streak_gain(), max_loss_streak_loss(), max_drawdown()]
-        max_drawdown()
-        return pd.Series(statistics)
+                return pd.DataFrame(specs, columns=[strat], index=metrics)
 
-    def double_sma_crossover(self, hist_data):
-        s_sma_len = 10
-        l_sma_len = 20
-        max_indicator_len = max(s_sma_len, l_sma_len)
+            return analysis(return_trades(portfolio))
 
-        balance = self.initial_capital
-        change_in_shares = list()
-        shares_out = list()
-        portfolio = list()
-        df = hist_data.iloc[len(hist_data) - self.bars_back - max_indicator_len : len(hist_data)].reset_index()
+        performance = pd.DataFrame(index=metrics)
+        for ticker in self.stocks:
+            performance[ticker] = backtest(self.stocks[ticker])
 
-        short_sma = simple_moving_avg(df, length=s_sma_len)
-        long_sma = simple_moving_avg(df, length=l_sma_len)
-
-        def entry(qty=self.default_qty_value, order_type='Market', long_when=True, short_when=False):
-            if long_when and not short_when:
-                if self.pyramiding is False and self.shorting is False:
-                    if order_type == 'Market':
-                         return qty
-            else:
-                return 0
-
-
-        for i in range(len(df)):
-            close = df['Adj_Close'].iloc[i]
-            # buy when short mov avg crosses over long mov avg. Sell when short dips below long sma
-            shares_out.append(entry(long_when=(short_sma.iloc[i] > long_sma.iloc[i]),
-                                    short_when=(short_sma.iloc[i] <= long_sma.iloc[i])))
-
-            shares = shares_out[-1]
-            if i == 0:
-                change = shares - 0
-            else:
-                change = shares - shares_out[-2]
-            change_in_shares.append(change)
-            balance -= (change * close)
-            portfolio.append(balance + (shares * close))
-        return pd.DataFrame({'Date': df['Date'], 'Adj_Close': df['Adj_Close'],
-                             'Portfolio': portfolio, 'Shares': shares_out, 'Change in Shares': change_in_shares})
-
-    def sma_crossover(self, hist_data):
-        sma_len = 20
-        max_indicator_len = sma_len
-
-        balance = self.initial_capital
-        change_in_shares = list()
-        shares_out = list()
-        portfolio = list()
-        df = hist_data.iloc[len(hist_data) - self.bars_back - max_indicator_len : len(hist_data)].reset_index()
-
-        sma = simple_moving_avg(df, length=sma_len)
-
-        def entry(qty=self.default_qty_value, order_type='Market', long_when=True, short_when=False):
-            if long_when and not short_when:
-                if self.pyramiding is False and self.shorting is False:
-                    if order_type == 'Market':
-                         return qty
-            else:
-                return 0
+        return performance
 
 
-        for i in range(len(df)):
-            close = df['Adj_Close'].iloc[i]
-            shares_out.append(entry(long_when=(close > sma.iloc[i]), short_when=(close <= sma.iloc[i])))
-            shares = shares_out[-1]
-            if i == 0:
-                change = shares - 0
-            else:
-                change = shares - shares_out[-2]
-            change_in_shares.append(change)
-            balance -= (change * close)
-            portfolio.append(balance + (shares * close))
-        return pd.DataFrame({'Date': df['Date'], 'Adj_Close': df['Adj_Close'],
-                             'Portfolio': portfolio, 'Shares': shares_out, 'Change in Shares': change_in_shares})
+# Class Quant requires only the input of a ticker as a string
+# Default settings can be tweaked by referencing the various keywords
 
-    def strat_performance_avg(self, strat):
-        perf = pd.DataFrame(index=['Percent Wins', 'Gross Profit', 'Gross Loss', 'Total Net Profit',
-                                   'Avg Profit per Trade', 'Median Profit per Trade', 'Largest Single Winning Trade',
-                                   'Largest Single Losing Trade', 'Profit Factor', 'Outlier Adjusted Profit Factor',
-                                   'Largest Win Streak', 'Largest Losing Streak', 'Gain during Max Win Streak',
-                                   'Loss during Max Losing Streak', 'Maximum Drawdown %'])
-        for i in self.stocks:
-            if strat == 'double sma crossover':
-                perf[i] = self.stats(self.double_sma_crossover(self.stocks[i])).values
-            elif strat == 'sma crossover':
-                perf[i] = self.stats(self.sma_crossover(self.stocks[i])).values
-        perf['Average'] = perf.mean(axis=1)
-        return perf
+# yfinance module is used to pull historical data. The pull can be adjusted by changing the "period" and "interval" class variables
 
-    def strat_compare(self, stats1, stats2, strat1_name, strat2_name):
-        comparison = pd.DataFrame()
-        comparison[strat1_name] = stats1['Average']
-        comparison[strat2_name] = stats2['Average']
-        # comparison['% Change'] = ((comparison[strat2_name] - comparison[strat1_name]) / comparison[strat1_name]) * 100
-        # comparison['% Change'] = comparison['% Change'].apply(int)
-        return comparison
+# "bars_back" trims the raw data by pulling the most recent x number of ticks. I can explain later why we need this
+
+# "initial capital" is how much cash we want the Quant to work with
+
+# "default_qty_type" does not have any functionality yet, however in the future it should allow the following options:
+#       if type = 'fixed', the value in the variable default_qty_val represents # of shares
+#       if type = 'cash', the value in the variable default_qty_val represents $
+#       if type = 'pct_of_equity', the value in the variable default_qty_val represents a % of however much cash the strategy has at the time
+
+# "pyramiding" indicates how many moves in the same direction can be made (i.e. increasing a long position)
+
+# if "shorting" is set to true, this will allow the strategy to short stocks - this should work but has not been tested
+
+class Quant(object):
+    def __init__(self, ticker, period='6mo', interval='1h', bars_back=500, default_qty_type='fixed',
+                 default_qty_val=10, initial_capital=1000, pyrmaiding=1, shorting=False):
+        self.bars_back = bars_back
+        self.interval = interval
+        self.period = period
+        self.pyrmaiding = pyrmaiding
+        self.ticker = ticker
+        self.initial_capital = initial_capital
+        self.default_qty_val = default_qty_val
+        self.default_qty_type = default_qty_type
+        self.adds_to_position = 0
+        self.shorting = shorting
+        self.df = yf.download(ticker, period=period, interval=interval).reset_index()
+
+    def algo(self):
+        # the algo function is what triggers the strategy. I'm pretty sure this is unnecessary
+        order_queue, unrealized_wealth, trades, positions, pos_change = (list() for i in range(5))
+
+        # An OpenOrder object is created whenever the criteria for an order is met
+        class OpenOrder(object):
+            # An order that specifies a limit or stop becomes a limit order or a stop order respectively - should work, not tested yet
+            def __init__(self, tag, date, qty, buy=True, limit=0, stop=0):
+                self.date = date
+                self.tag = tag
+                self.buy = buy
+                self.stop = stop
+                self.limit = limit
+                self.qty = qty
+                self.canceled = False
+
+            def execute_order(self, p):
+                # this function is called to see if the conditions for executing the order has been met. If so, returns true
+                # if the order is a market order (i.e. not a limit or stop order), this will always return true
+                if self.buy:
+                    if self.limit != 0 and self.stop == 0:
+                        # if it is a limit order, price must be below limit to be converted to market order
+                        if p <= self.limit:
+                            return True
+                        else:
+                            return False
+                    elif self.limit == 0 and self.stop != 0:
+                        # if it is a stop order, price must reach stop to be converted to market order
+                        if p >= self.stop:
+                            return True
+                        else:
+                            return False
+                    elif self.limit != 0 and self.stop != 0:
+                        # if it is a stop-limit order, price must reach stop and be below limit to be converted to market order
+                        if self.limit >= p >= self.stop:
+                            return True
+                        else:
+                            return False
+                    else:
+                        return True
+                else:
+                    if self.limit != 0 and self.stop == 0:
+                        # if it is a limit order, price must be below limit to be converted to market order
+                        if p >= self.limit:
+                            return True
+                        else:
+                            return False
+                    elif self.limit == 0 and self.stop != 0:
+                        # if it is a stop order, price must reach stop to be converted to market order
+                        if p <= self.stop:
+                            return True
+                        else:
+                            return False
+                    elif self.limit != 0 and self.stop != 0:
+                        # if it is a stop-limit order, price must reach stop and be below limit to be converted to market order
+                        if self.stop >= p >= self.limit:
+                            return True
+                        else:
+                            return False
+                    else:
+                        return True
+
+        # A FilledOrder object is created when an OpenOrder object executes the order. Simply logs information. Might be unnecessary, could be a dict
+        class FilledOrder(object):
+            def __init__(self, date, close, long, shares):
+                self.shares = shares
+                self.long = long
+                self.close = close
+                self.date = date
+
+        def entry(order, when=True, cancel_when=False):
+            if cancel_when:
+                # specify criteria for canceling an order (i.e. too much time has passed since the order has been placed)
+                order.canceled = True
+            if when:
+                # if the criteria for initiating an order has been met
+                if order.buy and self.adds_to_position != self.pyrmaiding:
+                    # if the order is to buy, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
+                    order_queue.append(order)
+                    self.adds_to_position += 1
+                elif self.shorting:
+                    # if shorting is allowed, if the order is to sell, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
+                    if order.buy is False and self.adds_to_position != (self.pyrmaiding * -1):
+                        order_queue.append(order)
+                        self.adds_to_position -= 1
+                else:
+                    if order.buy is False and self.adds_to_position != 0:
+                        # if the order is to sell, and shorting is not allowed, and we own stock, add the order to the queue
+                        # NOTE, this needs to be updated. This does not account for selling more than we own (i.e. shorting even though shorting shouldn't be allowed in this case)
+                        order_queue.append(order)
+                        self.adds_to_position -= 1
+
+        def trim(df):
+            # trims the historical data by however many bars_back is specified in the class variable
+            return df.iloc[len(self.df) - self.bars_back:].reset_index(drop=True)
+
+        def double_sma_crossover():
+            # this is a very basic strategy
+            hist = trim(self.df)
+
+            # initialize technical indicators we are going to use in our strategy
+            fast_sma = trim(simple_moving_avg(self.df, length=20))
+            slow_sma = trim(simple_moving_avg(self.df, length=100))
+
+            position = 0
+            balance = self.initial_capital
+
+            for i in range(len(hist)):
+                # this for loop starts iterating over every tick, buying or selling based on the criteria below
+                close = hist['Close'].iloc[i]
+                date = hist['Date'].iloc[i]
+
+                # buy when fast sma crosses over the slow sma
+                # sell when slow sma crosses over the fast sma
+                entry(OpenOrder('order1', date, self.default_qty_val), when=(fast_sma.iloc[i] > slow_sma.iloc[i]))
+                entry(OpenOrder('order1', date, self.default_qty_val, buy=False), when=(slow_sma.iloc[i] >= fast_sma.iloc[i]))
+
+                change = 0
+                for order in order_queue:
+                    if order.canceled:
+                        # if the order has been canceled, remove the order from the queue
+                        order_queue.remove(order)
+                    else:
+                        if order.execute_order(close):
+                            # if the order meets the criteria to actually be executed, add the filled order to the trades list and remove the open order form the queue
+                            filled_order = FilledOrder(date, close, order.buy, order.qty)
+
+                            trades.append(filled_order)
+                            order_queue.remove(order)
+
+                            # change variable shows the change in shares compared to the previous tick
+                            change += filled_order.shares if filled_order.long else (filled_order.shares * -1)
+
+                    # update tracking metrics
+                    position += change
+                    balance -= change * close
+
+                pos_change.append(change)
+                positions.append(position)
+                # unrealized wealth basically shows how your initial capital changed over every tick in the historical data
+                # this is changed by however many shares are owned at the time, and the price action
+                unrealized_wealth.append(balance + (position * close))
+
+            plt.plot(unrealized_wealth)
+            plt.show()
+
+        double_sma_crossover()
 
 
-stock = {'INTC': get_stock('INTC', refresh=False)}
-test = Strategy(stock)
-dsc_name = 'double sma crossover'
-sc_name = 'sma crossover'
-print(test.strat_compare(test.strat_performance_avg(sc_name), test.strat_performance_avg(dsc_name), sc_name, dsc_name))
+test = Quant('MSFT')
+test.algo()
+
