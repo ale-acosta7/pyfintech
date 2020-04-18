@@ -14,9 +14,8 @@ def trim(df, bars_back):
 
 
 class Indicators(object):
-    def __init__(self, df, bars_back):
+    def __init__(self, bars_back):
         self.bars_back = bars_back
-        self.df = df
 
     def simple_moving_avg(self, df, length=20, src='Close'):
         # calculate simple moving average
