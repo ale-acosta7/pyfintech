@@ -113,12 +113,12 @@ class Indicators(object):
                 OBV.append(OBV[-1] - row['Volume'])
             else:
                 OBV.append(OBV[-1])
-        return trim(pd.Series(OBV), self.df)
+        return trim(pd.Series(OBV), self.bars_back)
 
     def cci(self, df, length=20):
         tp = (df['High'] + df['Low'] + df['Close']) / 3
         final = pd.Series((tp - tp.rolling(window=length).mean()) / (0.015 * tp.rolling(window=length).std()))
-        return trim(final, self.df)
+        return trim(final, self.bars_back)
 
     def ichimoku(self, df, conversion_period=9, base_period=26, lagging_periods=52, displ=26):
         def donchian(period):
@@ -219,7 +219,7 @@ class Quant(object):
         self.shorting = shorting
         self.df = yf.download(ticker, period=period, interval=interval).reset_index()
         self.hist = trim(self.df, self.bars_back)
-        self.indicators = Indicators(self.df, self.bars_back)
+        self.indicators = Indicators(self.bars_back)
 
     order_queue, unrealized_wealth, all_trades, positions, pos_change = (list() for i in range(5))
     t = 0
