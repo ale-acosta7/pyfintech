@@ -185,8 +185,8 @@ class Indicators(object):
 
 
 class Quant(object):
-    def __init__(self, ticker, period='6mo', interval='1h', max_indicator_len=100, default_qty_type='fixed',
-                 default_qty_val=2, initial_capital=1000, pyrmaiding=1, shorting=False, adj_close=True):
+    def __init__(self, ticker, period='6mo', interval='1h', max_indicator_len=100,
+                 initial_capital=1000, pyrmaiding=1, shorting=False, adj_close=True):
 
         # ticker dictates the stock that the strategy will trade on. Required argument
 
@@ -205,17 +205,6 @@ class Quant(object):
         # Hist is the same as df, but drops the initial x number of days, where x = max_indicator_len
 
         self.hist = trim(self.df, self.max_indicator_len)
-
-        # Affects how the default_qty_val is used
-        #       if type = 'fixed', the value in the variable default_qty_val represents # of shares
-        #       if type = 'cash', the value in the variable default_qty_val represents $
-        #       if type = 'pct_of_equity', the value in the variable default_qty_val represents a % of whatever capital the strategy has at the time
-
-        self.default_qty_type = default_qty_type
-
-        # default_qty_val's interpretation depends on default_qty_type
-
-        self.default_qty_val = default_qty_val
 
         # initial capital dicatates the amount of cash the strategy has at the beginning of the strategy
         # The strategy can not purchase stock that would over exhaust the available funds
@@ -236,28 +225,36 @@ class Quant(object):
         # adj_close specifies whether to use the adjusted close or not
 
         self.adj_close = 'Adj Close' if adj_close else 'Close'
-        
+
         # tick represents the index the strategy is on. This must be updated when iterating over timeframe (below)
-        
+
         self.tick = 0
 
-        # timeframe is a range object used to iterate over the historical data 
+        # timeframe is a range object used to iterate over the historical data
 
         self.timeframe = range(len(self.hist))
-        
+
         # close and date represent the 'current' close and date, based on what tick the strategy is on
-        
+
         self.close = self.hist[self.adj_close].iloc[self.tick]
         self.date = self.hist['Date'].iloc[self.tick]
-        
+
         # indicators houses all the indicators that can be utilizes by the strategy
         # all indicators are automatically trimmed based on the max_indicator_len
 
         self.indicators = Indicators(self.max_indicator_len)
-        
+
         # balance represents the amount of available funds
-        
+
         self.balance = self.initial_capital
+
+        # shares_owned shows how many shares are currently being held (i.e. on the current tick)
+
+        self.shares_owned = 0
+
+        # change shows by how many shares the strategy has increased or decreased (0 if held constant)
+
+        self.change = 0
 
     # order_queue houses all open orders. orders are added when the criteria in the strategy in met.
     # orders are removed when the order is either canceled or executed (filled)
@@ -283,9 +280,14 @@ class Quant(object):
         self.tick = i
         self.close = self.hist[self.adj_close].iloc[self.tick]
         self.date = self.hist['Date'].iloc[self.tick]
+        self.change = 0
 
     def calc_shares(self, qty, qty_type='fixed'):
-        # demonstrates the function of defualt_qty_val and default_qty_type
+        # qty_type affects how the default_qty_val is used
+        #       if type = 'fixed', the value in the variable qty represents # of shares
+        #       if type = 'cash', the value in the variable qty represents $
+        #       if type = 'pct_of_equity', the value in the variable qty represents a % of whatever capital the strategy has at the time
+
         # returns an integer that represents shares. Used when placing orders
 
         if qty_type == 'cash':
@@ -361,18 +363,20 @@ class Quant(object):
             self.close = close
             self.date = date
 
-    def entry(self, order, when=False):
+    def entry(self, qty, qty_type='fixed', limit=0, stop=0, buy=True, when=False):
         # entry is used in strategies to create the OpenOrder objects when the criteria is met in the 'when' argument
+
+        order = self.OpenOrder(self.date, self.calc_shares(qty, qty_type), buy=buy, limit=limit, stop=stop)
 
         def print_message():
             print(f'{self.format_date(order.date)}: '
                   f'{"Buy" if order.buy else "Sell"} '
                   f'{"stop-limit" if (order.limit != 0 and order.stop != 0) else "limit" if order.limit != 0 else "stop" if order.stop != 0 else "market"} '
-                  f'order placed. {"Stop = " + order.stop + "; " if order.stop != 0 else "Limit = " + order.limit if order.limit != 0 else ""}')
+                  f'order placed. {"Stop = " + str(order.stop) + "; " if order.stop != 0 else "Limit = " + str(order.limit) if order.limit != 0 else ""}')
 
-        if when:
+        if when and order.qty != 0:
             # if the criteria for initiating an order has been met
-            if order.buy and self.adds_to_position != self.pyrmaiding:
+            if order.buy and self.adds_to_position != self.pyrmaiding and order.qty * self.close <= self.balance:
                 # if the order is to buy, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
                 print_message()
                 self.order_queue.append(order)
@@ -413,6 +417,7 @@ class Quant(object):
                 # if the order meets the criteria to actually be executed, add the filled order to the trades list and remove the open order form the queue
                 filled_order = self.FilledOrder(self.date, self.close, order.buy, order.qty)
                 trades.append(filled_order)
+                self.change += filled_order.qty if filled_order.long else filled_order.qty * -1
 
                 print(f'{self.format_date(self.date)}: '
                       f'Order executed. {"Bought" if filled_order.long else "Sold"} {filled_order.qty} Shares @ ${round(filled_order.close, 2)}'
@@ -420,45 +425,52 @@ class Quant(object):
 
                 self.order_queue.remove(order)
 
-        self.all_trades.append(trades)
+        # close out any positions at the end of the iteration
+        if self.tick == len(self.hist) - 1 and self.shares_owned != 0:
+            trades.append(self.FilledOrder(self.date, self.close, (False if self.shares_owned > 0 else True), abs(self.shares_owned)))
+            print(f'{self.format_date(self.date)}: Closed out of any open positions')
+            self.change += self.shares_owned * -1
 
-    def run_strat(self):
-        # run_strat takes the executed (filled) orders that were created by a strategy and returns a dataframe with tick by tick stats
+        # update the current position by adding the change
+        self.shares_owned += self.change
+        # balance should be decreased by (change in shares owned * close)
+        self.balance -= self.change * self.close
 
-        # position indicates the qty of shares owned at the time
-        position = 0
+        self.pos_change.append(self.change)
+        self.positions.append(self.shares_owned)
+        self.available_funds.append(self.balance)
+        self.portfolio.append(self.balance + (self.shares_owned * self.close))
 
-        for i in range(len(self.all_trades)):
+        if trades:
+            self.all_trades.append(trades)
 
-            change = 0
+    def exit_all(self, when=False):
+        # exit all positions when the criteria is met
 
-            # close out any positions at the end of the iteration
-            if i == len(self.all_trades) - 1 and self.positions[-1] != 0:
-                self.all_trades[-1].append(self.FilledOrder(self.date, self.close,
-                                                            (False if self.positions[-1] > 0 else True),
-                                                            abs(self.positions[-1])))
-                print(f'{self.format_date(self.date)}: Closed out of any open positions')
+        shares = self.positions[self.tick]
 
-            # For every trade per tick, add to change the qty of the trade (qty is negative if selling)
-            for trade in self.all_trades[i]:
-                change += trade.qty if trade.long else trade.qty * -1
+        order = self.OpenOrder(self.date, abs(shares), buy=(True if shares < 0 else False))
 
-            # update the current position by adding the change
-            position += change
-            # balance should be decreased by (change in shares owned * close)
-            self.balance -= change * self.hist[self.adj_close].iloc[i]
+        def print_message():
+            print(f'{self.format_date(self.date)}: '
+                  f'{"Buy" if order.buy else "Sell"} '
+                  f'{"stop-limit" if (order.limit != 0 and order.stop != 0) else "limit" if order.limit != 0 else "stop" if order.stop != 0 else "market"} '
+                  f'order placed. {"Stop = " + str(order.stop) + "; " if order.stop != 0 else "Limit = " + str(order.limit) if order.limit != 0 else ""}')
 
-            self.pos_change.append(change)
-            self.positions.append(position)
-            self.available_funds.append(self.balance)
-            self.portfolio.append(self.balance + (position * self.hist[self.adj_close].iloc[i]))
+        if when and order.qty != 0:
+
+            print_message()
+            self.order_queue.append(order)
+            self.adds_to_position -= 1 if shares > 0 else -1
+
+    def get_results(self):
 
         return pd.DataFrame({'Date': self.hist['Date'],
-                               'Close': self.hist[self.adj_close],
-                               'Shares Owned': self.positions,
-                               'Change in Shares Owned': self.pos_change,
-                               'Available Funds': self.available_funds,
-                               'Portfolio': self.portfolio})
+                             'Close': self.hist[self.adj_close],
+                             'Shares Owned': self.positions,
+                             'Change in Shares Owned': self.pos_change,
+                             'Available Funds': self.available_funds,
+                             'Portfolio': self.portfolio})
 
     def calc_profits(self):
         # UNTESTED with shorting
@@ -469,7 +481,7 @@ class Quant(object):
         profits = list()
         trades = list()
 
-        for day in [x for x in self.all_trades if x]:
+        for day in [x for x in self.all_trades]:
             for trade in day:
                 trades.append(trade)
 
@@ -520,14 +532,14 @@ class Quant(object):
         profit_factor = (gross_profit / abs(gross_loss)) if gross_loss != 0 else 'N/A'
 
         return pd.Series({'Gross Profit': f'${round(gross_profit, 2)}',
-                             'Gross Loss': f'${round(gross_loss, 2)}',
-                             'Net PnL': f'${round(net_pnl, 2)}',
-                             'Average Win': f'${round(avg_win, 2)}',
-                             'Average Loss': f'${round(avg_loss, 2)}',
-                             'Largest Gain': f'${round(largest_gain, 2)}',
-                             'Largest Loss': f'${round(largest_loss, 2)}',
-                             'Expectancy': f'${round(expectancy, 2)}',
-                             'Profit Factor': f'{round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor}'})
+                          'Gross Loss': f'${round(gross_loss, 2)}',
+                          'Net PnL': f'${round(net_pnl, 2)}',
+                          'Average Win': f'${round(avg_win, 2)}',
+                          'Average Loss': f'${round(avg_loss, 2)}',
+                          'Largest Gain': f'${round(largest_gain, 2)}',
+                          'Largest Loss': f'${round(largest_loss, 2)}',
+                          'Expectancy': f'${round(expectancy, 2)}',
+                          'Profit Factor': f'{round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor}'})
 
 
 def double_sma_crossover(quant):
@@ -537,28 +549,27 @@ def double_sma_crossover(quant):
     fast_sma = quant.indicators.simple_moving_avg(quant.df, length=20)
     slow_sma = quant.indicators.simple_moving_avg(quant.df, length=100)
 
-    # the next step is to create the criteria for when your orders will execute
-    # in this basic strategy, we want to buy stock when the fast simple mov avg crosses over the slow sma, and sell when the opposite occurs
-    buy_criteria = quant.crossover(fast_sma, slow_sma)
-    sell_criteria = quant.crossover(slow_sma, fast_sma)
-
     # the next step is to iterate over the timeframe and place orders based on our criteria
     for i in quant.timeframe:
         # we need to update what tick the quant is on using tick_update()
         quant.tick_update(i)
 
+        # the next step is to create the criteria for when your orders will execute
+        # in this basic strategy, we want to buy stock when the fast simple mov avg crosses over the slow sma, and sell when the opposite occurs
+        buy_criteria = quant.crossover(fast_sma, slow_sma)
+        sell_criteria = quant.crossover(slow_sma, fast_sma)
+
         # enter orders using entry
-        quant.entry(quant.OpenOrder(quant.date, 2), when=buy_criteria)
-        quant.entry(quant.OpenOrder(quant.date, 2, buy=False), when=sell_criteria)
+        quant.entry(2, when=buy_criteria)
+        quant.entry(2, buy=False, when=sell_criteria)
 
         # use process orders to see if the orders meet the criteria to be executed
         # Because these are simple market orders, they will be executed right away
         quant.process_orders()
 
-    # finally, we will have our strategy run the strategy and update metrics based on the orders we bought and sold
-    return quant.run_strat()
+    # finally, we will return the results of our strategy
+    return quant.get_results()
 
 
 q = Quant('MSFT')
 double_sma_crossover(q)
-
