@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 import yfinance as yf
 import pandas as pd
 
@@ -9,27 +10,28 @@ def trim(df, indicator_len):
 
 
 class Indicators(object):
-    def __init__(self, bars_back):
+    def __init__(self, df, bars_back):
+        self.df = df
         self.bars_back = bars_back
 
-    def simple_moving_avg(self, df, length=20, src='Adj Close'):
+    def simple_moving_avg(self, length=20, src='Adj Close'):
         # calculate simple moving average
-        return trim(df[src].rolling(window=length).mean(), self.bars_back)
+        return trim(self.df[src].rolling(window=length).mean(), self.bars_back)
 
-    def exp_moving_avg(self, df, length=20, src='Adj Close'):
+    def exp_moving_avg(self, length=20, src='Adj Close'):
         # calculate exponential moving average
-        return trim(df[src].ewm(span=length, adjust=False).mean(), self.bars_back)
+        return trim(self.df[src].ewm(span=length, adjust=False).mean(), self.bars_back)
 
-    def volume_weighted_mov_avg(self, df, length=20, src='Adj Close'):
+    def volume_weighted_mov_avg(self, length=20, src='Adj Close'):
         # volume times price
-        vol_price = df[src] * df['Volume']
+        vol_price = self.df[src] * self.df['Volume']
         # rolling weighted average
-        return trim(vol_price.rolling(window=length).sum() / df['Volume'].rolling(window=length).sum(), self.bars_back)
+        return trim(vol_price.rolling(window=length).sum() / self.df['Volume'].rolling(window=length).sum(), self.bars_back)
 
-    def rel_strength_index(self, df, length=14, src='Adj Close'):
+    def rel_strength_index(self, length=14, src='Adj Close'):
         # calculate Relative Strength Index (RSI)
         # find change from one tick to the next
-        delta = df[src].diff()
+        delta = self.df[src].diff()
         # create duplicates two duplicates of delta, and keep positive values in 'gain' and negative values in 'loss'
         gain, loss = delta.copy(), delta.copy()
         gain[gain < 0] = 0
@@ -42,11 +44,11 @@ class Indicators(object):
         final = 100.0 - (100.0 / (1.0 + rs))
         return trim(final, self.bars_back)
 
-    def bollinger_bands(self, df, length=20, st_dev=2., offset=0, src='Adj Close'):
+    def bollinger_bands(self, length=20, st_dev=2., offset=0, src='Adj Close'):
         # calculate bollinger bands
-        basis = self.simple_moving_avg(df, length=length)
+        basis = self.simple_moving_avg(length=length)
         # find ROLLING standard deviation over specified length
-        sd = df[src].rolling(window=length).std(ddof=0)
+        sd = self.df[src].rolling(window=length).std(ddof=0)
 
         basis = basis.shift(offset)
         upper_band = basis + (sd * st_dev)
@@ -55,15 +57,15 @@ class Indicators(object):
         bb = pd.DataFrame({'Basis': basis, 'Upper Band': upper_band, 'Lower Band': lower_band})
         return trim(bb, self.bars_back)
 
-    def MACD(self, df, fast_length=12, slow_length=26, src='Adj Close', smoothing=9, simple_oscillator=False,
+    def MACD(self, fast_length=12, slow_length=26, src='Adj Close', smoothing=9, simple_oscillator=False,
              simple_signal=False):
         # calculate Moving Average Convergence / Divergence
-        fast_ma = self.exp_moving_avg(df, length=fast_length, src=src)
-        slow_ma = self.exp_moving_avg(df, length=slow_length, src=src)
+        fast_ma = self.exp_moving_avg(length=fast_length, src=src)
+        slow_ma = self.exp_moving_avg(length=slow_length, src=src)
 
         if simple_oscillator is True:
-            fast_ma = self.simple_moving_avg(df, length=fast_length, src=src)
-            slow_ma = self.simple_moving_avg(df, length=slow_length, src=src)
+            fast_ma = self.simple_moving_avg(length=fast_length, src=src)
+            slow_ma = self.simple_moving_avg(length=slow_length, src=src)
 
         macd = fast_ma - slow_ma
         signal = macd.ewm(span=smoothing, adjust=False).mean()
@@ -77,63 +79,63 @@ class Indicators(object):
         indicator = pd.DataFrame({'MACD': macd, 'Signal': signal, 'Hist': hist})
         return trim(indicator, self.bars_back)
 
-    def hl2(self, df):
+    def hl2(self):
         # average of high and low
-        return trim((df['High'] + df['Low']) / 2, self.bars_back)
+        return trim((self.df['High'] + self.df['Low']) / 2, self.bars_back)
 
-    def hlc3(self, df):
+    def hlc3(self):
         # average of high, low, and close
-        return trim((df['High'] + df['Low'] + df['Adj Close']) / 3, self.bars_back)
+        return trim((self.df['High'] + self.df['Low'] + self.df['Adj Close']) / 3, self.bars_back)
 
-    def ohlc4(self, df):
+    def ohlc4(self):
         # average of high, low, close, and open
-        return trim((df['High'] + df['Low'] + df['Adj Close'] + df['Open']) / 4, self.bars_back)
+        return trim((self.df['High'] + self.df['Low'] + self.df['Adj Close'] + self.df['Open']) / 4, self.bars_back)
 
-    def stochastic(self, df, period_k=14, period_d=3, smooth=3):
+    def stochastic(self, period_k=14, period_d=3, smooth=3):
         # calculates stochastics
-        low_low = df['Low'].rolling(window=period_k).min()
-        high_high = df['High'].rolling(window=period_k).max()
-        k = (((df['Adj Close'] - low_low) * 100) / (high_high - low_low))
+        low_low = self.df['Low'].rolling(window=period_k).min()
+        high_high = self.df['High'].rolling(window=period_k).max()
+        k = (((self.df['Adj Close'] - low_low) * 100) / (high_high - low_low))
         k = k.rolling(window=smooth).mean()
         d = k.rolling(window=period_d).mean()
         stoch = pd.DataFrame({'%K': k, '%D': d})
         return trim(stoch, self.bars_back)
 
-    def obv(self, df):
-        OBV = [df.iloc[0]['Volume']]
-        for i in range(1, len(df)):
-            row = df.iloc[i]
-            if row['Adj Close'] > df.iloc[i - 1]['Adj Close']:
+    def obv(self):
+        OBV = [self.df.iloc[0]['Volume']]
+        for i in range(1, len(self.df)):
+            row = self.df.iloc[i]
+            if row['Adj Close'] > self.df.iloc[i - 1]['Adj Close']:
                 OBV.append(OBV[-1] + row['Volume'])
-            elif row['Adj Close'] < df.iloc[i - 1]['Adj Close']:
+            elif row['Adj Close'] < self.df.iloc[i - 1]['Adj Close']:
                 OBV.append(OBV[-1] - row['Volume'])
             else:
                 OBV.append(OBV[-1])
         return trim(pd.Series(OBV), self.bars_back)
 
-    def cci(self, df, length=20):
-        tp = (df['High'] + df['Low'] + df['Adj Close']) / 3
+    def cci(self, length=20):
+        tp = (self.df['High'] + self.df['Low'] + self.df['Adj Close']) / 3
         final = pd.Series((tp - tp.rolling(window=length).mean()) / (0.015 * tp.rolling(window=length).std()))
         return trim(final, self.bars_back)
 
-    def ichimoku(self, df, conversion_period=9, base_period=26, lagging_periods=52, displ=26):
+    def ichimoku(self, conversion_period=9, base_period=26, lagging_periods=52, displ=26):
         def donchian(period):
-            return (df['High'].rolling(window=period).max() + df['Low'].rolling(window=period).min()) / 2
+            return (self.df['High'].rolling(window=period).max() + self.df['Low'].rolling(window=period).min()) / 2
 
         conversion_line = donchian(conversion_period)
         base_line = donchian(base_period)
         ls_a = ((conversion_line + base_line) / 2).shift(displ)
         ls_b = donchian(lagging_periods).shift(displ)
-        lagging = df['Adj Close'].shift(-1 * displ)
+        lagging = self.df['Adj Close'].shift(-1 * displ)
         ichi_cloud = pd.DataFrame({'Conversion Line': conversion_line, 'Base Line': base_line,
                                    'Lead 1': ls_a, 'Lead 2': ls_b, 'Lagging': lagging})
         return trim(ichi_cloud, self.bars_back)
 
-    def p_sar(self, df, accel=0.02, max_val=0.2):
-        length = len(df)
-        high = list(df['High'])
-        low = list(df['Low'])
-        close = list(df['Adj Close'])
+    def p_sar(self, accel=0.02, max_val=0.2):
+        length = len(self.df)
+        high = list(self.df['High'])
+        low = list(self.df['Low'])
+        close = list(self.df['Adj Close'])
         psar = close[0:length]
         bull = True
         af = accel
@@ -186,7 +188,7 @@ class Indicators(object):
 
 class Quant(object):
     def __init__(self, ticker, period='6mo', interval='1h', max_indicator_len=100,
-                 initial_capital=1000, pyrmaiding=1, shorting=False, adj_close=True):
+                 initial_capital=1000, pyrmaiding=1, shorting=False, adj_close=True, play_by_play=True):
 
         # ticker dictates the stock that the strategy will trade on. Required argument
 
@@ -195,16 +197,16 @@ class Quant(object):
         # Uses the yfinance module to download the historical data based on  ticker, period, and interval arguments
         # Used exclusively in the creation of indicators
 
-        self.df = yf.download(ticker, period=period, interval=interval).reset_index()
+        self.raw_historicals = yf.download(ticker, period=period, interval=interval).reset_index()
 
         # max_indicator_len specifies the longest length used by an indicator in a strategy
         # this helps account for indicators that use long rolling periods, thus not showing any data initially
 
         self.max_indicator_len = max_indicator_len
 
-        # Hist is the same as df, but drops the initial x number of days, where x = max_indicator_len
+        # historicals is the same as raw_historicals, but drops the initial x number of days, where x = max_indicator_len
 
-        self.hist = trim(self.df, self.max_indicator_len)
+        self.historicals = trim(self.raw_historicals, self.max_indicator_len)
 
         # initial capital dicatates the amount of cash the strategy has at the beginning of the strategy
         # The strategy can not purchase stock that would over exhaust the available funds
@@ -218,7 +220,7 @@ class Quant(object):
         self.pyrmaiding = pyrmaiding
         self.adds_to_position = 0
 
-        # shorting specifies if the strategy is allowed to short stock (take a negative position). Default is False. UNTESTED
+        # shorting specifies if the strategy is allowed to short stock (take a negative position). NOT FUNCTIONAL
 
         self.shorting = shorting
 
@@ -226,50 +228,86 @@ class Quant(object):
 
         self.adj_close = 'Adj Close' if adj_close else 'Close'
 
+        # play_by_play prints updates to simulate live trading. If set to false, no messages are shown
+
+        self.play_by_play = play_by_play
+
         # tick represents the index the strategy is on. This must be updated when iterating over timeframe (below)
 
         self.tick = 0
 
         # timeframe is a range object used to iterate over the historical data
 
-        self.timeframe = range(len(self.hist))
+        self.timeframe = range(len(self.historicals))
 
         # close and date represent the 'current' close and date, based on what tick the strategy is on
 
-        self.close = self.hist[self.adj_close].iloc[self.tick]
-        self.date = self.hist['Date'].iloc[self.tick]
+        self.close = self.historicals[self.adj_close].iloc[self.tick]
+        self.date = self.historicals['Date'].iloc[self.tick]
 
         # indicators houses all the indicators that can be utilizes by the strategy
         # all indicators are automatically trimmed based on the max_indicator_len
 
-        self.indicators = Indicators(self.max_indicator_len)
+        self.indicators = Indicators(self.raw_historicals, self.max_indicator_len)
 
-        # balance represents the amount of available funds
+        # Cost of purchasing stock can not exceed available funds
 
-        self.balance = self.initial_capital
+        self.available_funds = self.initial_capital
+
+        # available_funds_lst shows the history of available funds
+
+        self.available_funds_lst = list()
+
+        # balance = available funds + (however many shares were purchased * the close at the time)
+
+        self.balance = list()
 
         # shares_owned shows how many shares are currently being held (i.e. on the current tick)
 
         self.shares_owned = 0
 
-        # change shows by how many shares the strategy has increased or decreased (0 if held constant)
+        # positions shows the shares owned over time
 
-        self.change = 0
+        self.positions = list()
 
-    # order_queue houses all open orders. orders are added when the criteria in the strategy in met.
-    # orders are removed when the order is either canceled or executed (filled)
+        # change_in_shares shows by how many shares the strategy has increased or decreased (0 if held constant)
 
-    # portfolio captures the available funds i.e. the balance + (however many shares were purchased * the close at the time)
+        self.change_in_shares = 0
 
-    # available funds captures the balance value over time
+        # pos_change shows the change from day to day in position size
 
-    # all_trades captures all executed trades
+        self.pos_change = list()
 
-    # positions shows the shares owned over time
+        # order_queue houses all open orders. orders are added when the criteria in the strategy in met.
+        # orders are removed when the order is either canceled or executed (filled)
 
-    # pos_change shows the change from day to day in position size
+        self.order_queue = list()
 
-    order_queue, portfolio, available_funds, all_trades, positions, pos_change = (list() for x in range(6))
+        # pct_change shows the % increase or decrease in the balance. Daily return expresses the change in dollar terms
+
+        self.pct_change = list()
+
+        self.log_returns = list()
+
+        # running_pct_change shows the % increase or decrease relative to the initial capital
+
+        self.running_pct_chnge = list()
+
+        # returns show the gain/loss in dollars from tick to tick
+
+        self.returns = list()
+
+        # cumulative_returns show the gain/loss relative to initial_capital
+
+        self.cumulative_returns = list()
+
+        # drawdown is the peak to trough % decline. Helps gauge historical risk
+
+        self.drawdown = list()
+
+        # trades houses all the executed trades
+
+        self.trades = list()
 
     def format_date(self, date):
         # used to format dates in the following format: ex. Feb 24 2020
@@ -278,9 +316,9 @@ class Quant(object):
     def tick_update(self, i):
         # update tick and current date/close
         self.tick = i
-        self.close = self.hist[self.adj_close].iloc[self.tick]
-        self.date = self.hist['Date'].iloc[self.tick]
-        self.change = 0
+        self.close = self.historicals[self.adj_close].iloc[self.tick]
+        self.date = self.historicals['Date'].iloc[self.tick]
+        self.change_in_shares = 0
 
     def calc_shares(self, qty, qty_type='fixed'):
         # qty_type affects how the default_qty_val is used
@@ -365,6 +403,7 @@ class Quant(object):
 
     def entry(self, qty, qty_type='fixed', limit=0, stop=0, buy=True, when=False):
         # entry is used in strategies to create the OpenOrder objects when the criteria is met in the 'when' argument
+        # Orders are added to the order_queue
 
         order = self.OpenOrder(self.date, self.calc_shares(qty, qty_type), buy=buy, limit=limit, stop=stop)
 
@@ -372,27 +411,26 @@ class Quant(object):
             print(f'{self.format_date(order.date)}: '
                   f'{"Buy" if order.buy else "Sell"} '
                   f'{"stop-limit" if (order.limit != 0 and order.stop != 0) else "limit" if order.limit != 0 else "stop" if order.stop != 0 else "market"} '
-                  f'order placed. {"Stop = " + str(order.stop) + "; " if order.stop != 0 else "Limit = " + str(order.limit) if order.limit != 0 else ""}')
+                  f'order placed. {"Stop = " + str(round(order.stop, 2)) + "; " if order.stop != 0 else "Limit = " + str(round(order.limit, 2)) if order.limit != 0 else ""}')
 
         if when and order.qty != 0:
             # if the criteria for initiating an order has been met
-            if order.buy and self.adds_to_position != self.pyrmaiding and order.qty * self.close <= self.balance:
+            if order.buy and self.adds_to_position != self.pyrmaiding and order.qty * self.close <= self.available_funds:
                 # if the order is to buy, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
                 print_message()
                 self.order_queue.append(order)
-                self.adds_to_position += 1
             elif self.shorting:
                 # if shorting is allowed, if the order is to sell, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
                 if order.buy is False and self.adds_to_position != (self.pyrmaiding * -1):
                     self.order_queue.append(order)
-                    self.adds_to_position -= 1
             else:
                 if order.buy is False and self.adds_to_position != 0:
                     # if the order is to sell, and shorting is not allowed, and we own stock, add the order to the queue
                     # need to provide a scenario for when the order tries to sell more shares than is owned at the time
-                    print_message()
+
+                    if self.play_by_play:
+                        print_message()
                     self.order_queue.append(order)
-                    self.adds_to_position -= 1
 
     def crossover(self, x, y):
         # crossover is a tool that returns True if x crosses over y else False
@@ -410,39 +448,56 @@ class Quant(object):
     def process_orders(self):
         # process_orders checks each OpenOrder in the order_queue and converts these into FilledOrders if criteria is met
 
-        trades = list()
-
         for order in self.order_queue:
             if order.execute_order(self.close):
                 # if the order meets the criteria to actually be executed, add the filled order to the trades list and remove the open order form the queue
                 filled_order = self.FilledOrder(self.date, self.close, order.buy, order.qty)
-                trades.append(filled_order)
-                self.change += filled_order.qty if filled_order.long else filled_order.qty * -1
+                self.trades.append(filled_order)
+                self.change_in_shares += filled_order.qty if filled_order.long else filled_order.qty * -1
+                self.adds_to_position += 1 if filled_order.long else -1
 
-                print(f'{self.format_date(self.date)}: '
-                      f'Order executed. {"Bought" if filled_order.long else "Sold"} {filled_order.qty} Shares @ ${round(filled_order.close, 2)}'
-                      f'\n {self.date - order.date} have passed since the order was initially placed')
+                if self.play_by_play:
+
+                    print(f'{self.format_date(self.date)}: '
+                          f'Order executed. {"Bought" if filled_order.long else "Sold"} {filled_order.qty} Shares @ ${round(filled_order.close, 2)} (${round(filled_order.qty * filled_order.close, 2)})'
+                          f'\n {self.date - order.date} have passed since the order was initially placed')
 
                 self.order_queue.remove(order)
 
         # close out any positions at the end of the iteration
-        if self.tick == len(self.hist) - 1 and self.shares_owned != 0:
-            trades.append(self.FilledOrder(self.date, self.close, (False if self.shares_owned > 0 else True), abs(self.shares_owned)))
-            print(f'{self.format_date(self.date)}: Closed out of any open positions')
-            self.change += self.shares_owned * -1
+        if self.tick == len(self.historicals) - 1 and self.shares_owned != 0:
+            self.trades.append(self.FilledOrder(self.date, self.close, (False if self.shares_owned > 0 else True), abs(self.shares_owned)))
+
+            if self.play_by_play:
+
+                print(f'{self.format_date(self.date)}: Closed out of any open positions')
+
+            self.change_in_shares += self.shares_owned * -1
 
         # update the current position by adding the change
-        self.shares_owned += self.change
+        self.shares_owned += self.change_in_shares
         # balance should be decreased by (change in shares owned * close)
-        self.balance -= self.change * self.close
+        self.available_funds -= self.change_in_shares * self.close
 
-        self.pos_change.append(self.change)
+        self.pos_change.append(self.change_in_shares)
         self.positions.append(self.shares_owned)
-        self.available_funds.append(self.balance)
-        self.portfolio.append(self.balance + (self.shares_owned * self.close))
+        self.available_funds_lst.append(self.available_funds)
+        self.balance.append(self.available_funds + (self.shares_owned * self.close))
 
-        if trades:
-            self.all_trades.append(trades)
+        if self.tick > 0:
+            self.pct_change.append((self.balance[-1] - self.balance[-2]) / self.balance[-2])
+            self.running_pct_chnge.append((self.balance[-1] - self.balance[0]) / self.balance[0])
+            self.drawdown.append((self.balance[-1] - max(self.balance)) / max(self.balance))
+            self.returns.append((self.balance[-1] - self.balance[-2]))
+            self.cumulative_returns.append(self.returns[-1] + sum(self.returns[1:-1]))
+            self.log_returns.append(np.log(self.balance[-1] / self.balance[-2]))
+        else:
+            self.pct_change.append(np.NaN)
+            self.running_pct_chnge.append(np.NaN)
+            self.drawdown.append(np.NaN)
+            self.returns.append(np.NaN)
+            self.cumulative_returns.append(np.NaN)
+            self.log_returns.append(np.NaN)
 
     def exit_all(self, when=False):
         # exit all positions when the criteria is met
@@ -459,18 +514,25 @@ class Quant(object):
 
         if when and order.qty != 0:
 
-            print_message()
+            if self.play_by_play:
+                print_message()
             self.order_queue.append(order)
             self.adds_to_position -= 1 if shares > 0 else -1
 
     def get_results(self):
 
-        return pd.DataFrame({'Date': self.hist['Date'],
-                             'Close': self.hist[self.adj_close],
+        return pd.DataFrame({'Date': self.historicals['Date'],
+                             'Close': self.historicals[self.adj_close],
                              'Shares Owned': self.positions,
                              'Change in Shares Owned': self.pos_change,
-                             'Available Funds': self.available_funds,
-                             'Portfolio': self.portfolio})
+                             'Available Funds': self.available_funds_lst,
+                             'Balance': self.balance,
+                             'Returns': self.returns,
+                             '% Change': self.pct_change,
+                             'Log Returns': self.log_returns,
+                             'Cumulative Returns': self.cumulative_returns,
+                             'Running % Change': self.running_pct_chnge,
+                             'Drawdown': self.drawdown})
 
     def calc_profits(self):
         # UNTESTED with shorting
@@ -479,11 +541,7 @@ class Quant(object):
         # returns a list populated with profit info about each buy/sell pair
 
         profits = list()
-        trades = list()
-
-        for day in [x for x in self.all_trades]:
-            for trade in day:
-                trades.append(trade)
+        trades = self.trades.copy()
 
         while len(trades) > 1:
             first_in = trades[0]
@@ -513,10 +571,14 @@ class Quant(object):
 
         return profits
 
+    def show_charts(self, metric):
+        plt.plot(metric)
+        plt.show()
+
     def analysis(self):
         # provides basic metrics on strategy in dataframe form
 
-        profits = pd.Series([x['Profit'] for x in self.calc_profits()])
+        profits = pd.Series([x['Profit'] for x in self.calc_profits()], name='Profit')
         winners = profits[lambda x: x > 0]
         losers = profits[lambda x: x < 0]
 
@@ -524,30 +586,41 @@ class Quant(object):
         gross_profit = winners.sum()
         gross_loss = losers.sum()
         net_pnl = gross_profit + gross_loss
+        pct_gain = self.running_pct_chnge[-1]
         avg_win = winners.mean()
         avg_loss = losers.mean()
         largest_gain = winners.max()
         largest_loss = losers.min()
         expectancy = (avg_win * win_rate) - (avg_loss * (1 - win_rate))
         profit_factor = (gross_profit / abs(gross_loss)) if gross_loss != 0 else 'N/A'
+        max_drawdown = min(self.drawdown[1:])
+        sharpe = pd.Series(self.returns).mean() / pd.Series(self.returns).std()
+        sortino = pd.Series(self.returns).mean() / np.sqrt(pd.Series(self.returns).apply(lambda x: x ** 2 if x < 0 else 0)).mean()
 
-        return pd.Series({'Gross Profit': f'${round(gross_profit, 2)}',
+        return pd.Series({'Ticker': self.ticker,
+                          'Gross Profit': f'${round(gross_profit, 2)}',
                           'Gross Loss': f'${round(gross_loss, 2)}',
                           'Net PnL': f'${round(net_pnl, 2)}',
+                          '% G/L': f'{round(pct_gain * 100, 2)}%',
+                          '# of Trades': profits.count(),
+                          'Win Rate': f'{round(win_rate * 100, 2)}%',
                           'Average Win': f'${round(avg_win, 2)}',
                           'Average Loss': f'${round(avg_loss, 2)}',
-                          'Largest Gain': f'${round(largest_gain, 2)}',
+                          'Largest Win': f'${round(largest_gain, 2)}',
                           'Largest Loss': f'${round(largest_loss, 2)}',
                           'Expectancy': f'${round(expectancy, 2)}',
-                          'Profit Factor': f'{round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor}'})
+                          'Profit Factor': f'{round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor}',
+                          'Maximum Drawdown': f'{round(max_drawdown * 100, 2)}%',
+                          'Sharpe Ratio': round(sharpe, 2),
+                          'Sortino Ratio': round(sortino, 2)})
 
 
 def double_sma_crossover(quant):
     # this is an example of a very basic strategy that provides an example of how to utilize the Quant class
 
     # The first step when creating a strategy is to create the indicators you plan on using
-    fast_sma = quant.indicators.simple_moving_avg(quant.df, length=20)
-    slow_sma = quant.indicators.simple_moving_avg(quant.df, length=100)
+    fast_sma = quant.indicators.simple_moving_avg(length=20)
+    slow_sma = quant.indicators.simple_moving_avg(length=100)
 
     # the next step is to iterate over the timeframe and place orders based on our criteria
     for i in quant.timeframe:
@@ -573,3 +646,5 @@ def double_sma_crossover(quant):
 
 q = Quant('MSFT')
 double_sma_crossover(q)
+print()
+print(q.analysis())
