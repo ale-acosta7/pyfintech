@@ -3,6 +3,10 @@ import numpy as np
 import yfinance as yf
 import pandas as pd
 
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.width', 320)
+
 
 def trim(df, indicator_len):
     # trims the historical data by however many bars_back is specified in the class variable
@@ -285,29 +289,43 @@ class Quant(object):
 
         # pct_change shows the % increase or decrease in the balance. Daily return expresses the change in dollar terms
 
-        self.pct_change = list()
+        self.pct_change = pd.Series()
 
-        self.log_returns = list()
+        self.log_returns = pd.Series()
 
         # running_pct_change shows the % increase or decrease relative to the initial capital
 
-        self.running_pct_chnge = list()
+        self.running_pct_change = pd.Series()
 
         # returns show the gain/loss in dollars from tick to tick
 
-        self.returns = list()
+        self.returns = pd.Series()
 
         # cumulative_returns show the gain/loss relative to initial_capital
 
-        self.cumulative_returns = list()
+        self.cumulative_returns = pd.Series()
 
         # drawdown is the peak to trough % decline. Helps gauge historical risk
 
-        self.drawdown = list()
+        self.drawdown = pd.Series()
 
         # trades houses all the executed trades
 
         self.trades = list()
+
+    def current(self, iterable):
+        # return the current value in the iterable
+        if isinstance(iterable, list):
+            return iterable[self.tick]
+        else:
+            return iterable.iloc[self.tick]
+
+    def previous(self, iterable, ticks=1):
+        # return the value in the iterable from n tick(s) before the current period
+        if isinstance(iterable, list):
+            return iterable[self.tick - ticks]
+        else:
+            return iterable.iloc[self.tick - ticks]
 
     def format_date(self, date):
         # used to format dates in the following format: ex. Feb 24 2020
@@ -417,7 +435,8 @@ class Quant(object):
             # if the criteria for initiating an order has been met
             if order.buy and self.adds_to_position != self.pyrmaiding and order.qty * self.close <= self.available_funds:
                 # if the order is to buy, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
-                print_message()
+                if self.play_by_play:
+                    print_message()
                 self.order_queue.append(order)
             elif self.shorting:
                 # if shorting is allowed, if the order is to sell, and the number of moves in a position does not yet equal the pyramiding limit, add the order to the queue
@@ -470,7 +489,7 @@ class Quant(object):
 
             if self.play_by_play:
 
-                print(f'{self.format_date(self.date)}: Closed out of any open positions')
+                print(f'{self.format_date(self.date)}: Closed out of any open positions \n')
 
             self.change_in_shares += self.shares_owned * -1
 
@@ -479,25 +498,24 @@ class Quant(object):
         # balance should be decreased by (change in shares owned * close)
         self.available_funds -= self.change_in_shares * self.close
 
-        self.pos_change.append(self.change_in_shares)
         self.positions.append(self.shares_owned)
+        self.pos_change.append(self.change_in_shares)
         self.available_funds_lst.append(self.available_funds)
         self.balance.append(self.available_funds + (self.shares_owned * self.close))
 
-        if self.tick > 0:
-            self.pct_change.append((self.balance[-1] - self.balance[-2]) / self.balance[-2])
-            self.running_pct_chnge.append((self.balance[-1] - self.balance[0]) / self.balance[0])
-            self.drawdown.append((self.balance[-1] - max(self.balance)) / max(self.balance))
-            self.returns.append((self.balance[-1] - self.balance[-2]))
-            self.cumulative_returns.append(self.returns[-1] + sum(self.returns[1:-1]))
-            self.log_returns.append(np.log(self.balance[-1] / self.balance[-2]))
-        else:
-            self.pct_change.append(np.NaN)
-            self.running_pct_chnge.append(np.NaN)
-            self.drawdown.append(np.NaN)
-            self.returns.append(np.NaN)
-            self.cumulative_returns.append(np.NaN)
-            self.log_returns.append(np.NaN)
+        # below are metrics that can be calculated via pandas as opposed to appending to a list
+
+        balance = pd.Series(self.balance)
+
+        self.pct_change = balance.pct_change()
+        self.running_pct_change = self.pct_change.cumsum()
+
+        self.returns = balance.diff()
+        self.cumulative_returns = self.returns.cumsum()
+
+        self.drawdown = (balance - balance.cummax()) / balance.cummax()
+
+        self.log_returns = np.log(balance).diff()
 
     def exit_all(self, when=False):
         # exit all positions when the criteria is met
@@ -519,28 +537,43 @@ class Quant(object):
             self.order_queue.append(order)
             self.adds_to_position -= 1 if shares > 0 else -1
 
-    def get_results(self):
+    def get_results(self, condensed=True):
 
-        return pd.DataFrame({'Date': self.historicals['Date'],
-                             'Close': self.historicals[self.adj_close],
-                             'Shares Owned': self.positions,
-                             'Change in Shares Owned': self.pos_change,
-                             'Available Funds': self.available_funds_lst,
-                             'Balance': self.balance,
-                             'Returns': self.returns,
-                             '% Change': self.pct_change,
-                             'Log Returns': self.log_returns,
-                             'Cumulative Returns': self.cumulative_returns,
-                             'Running % Change': self.running_pct_chnge,
-                             'Drawdown': self.drawdown})
+        report = pd.DataFrame({'Date': self.historicals['Date'],
+                               'Close': self.historicals[self.adj_close],
+                               'Shares Owned': self.positions,
+                               'Change in Shares Owned': self.pos_change,
+                               'Available Funds': self.available_funds_lst,
+                               'Balance': self.balance,
+                               'Returns': self.returns,
+                               '% Change': self.pct_change,
+                               'Log Returns': self.log_returns,
+                               'Cumulative Returns': self.cumulative_returns,
+                               'Running % Change': self.running_pct_change,
+                               'Drawdown': self.drawdown})
 
-    def calc_profits(self):
-        # UNTESTED with shorting
+        if condensed:
+
+            report = report[report['Change in Shares Owned'] != 0]
+            report['Returns'] = report['Balance'].diff()
+            report['% Change'] = report['Balance'].pct_change()
+            report['Log Returns'] = np.log(report['Balance']).diff()
+            report['Running % Change'] = report['% Change'].cumsum()
+            report['Time Delta'] = report['Date'].diff()
+
+            return report.drop(['Drawdown'], axis=1)
+
+        else:
+
+            return report
+
+    def show_trades(self):
         # operates on the FIFO system - first in, first out.
         # This is to account for periods when buying and selling quantities are not equal every time
-        # returns a list populated with profit info about each buy/sell pair
+        # returns a dataframe
 
-        profits = list()
+        trade_type, opens, closes, shares, profits, pct_change, start_date, end_date, time_delta = [list() for x in range(9)]
+
         trades = self.trades.copy()
 
         while len(trades) > 1:
@@ -556,20 +589,34 @@ class Quant(object):
             except IndexError:
                 break
 
-            shares = min(first_in.qty, first_out.qty)
-            net = (shares * first_out.close) - (shares * first_in.close)
-            profits.append({'Profit': net,
-                            'Pct Gain': (net / (shares * first_in.close)) * 100,
-                            'Shares': shares, 'Start': first_in.date, 'End': first_out.date,
-                            'Time delta': first_out.date - first_in.date})
+            qty = min(first_in.qty, first_out.qty)
+            net = ((qty * first_out.close) - (qty * first_in.close)) * (1 if first_in.long else -1)
+
+            trade_type.append('Long' if first_in.long else 'Short')
+            opens.append(first_in.close)
+            closes.append(first_out.close)
+            shares.append(qty)
+            profits.append(net)
+            pct_change.append(net / (qty * first_in.close))
+            start_date.append(self.format_date(first_in.date))
+            end_date.append(self.format_date(first_out.date))
+            time_delta.append(first_out.date - first_in.date)
 
             def reduce_qty(x):
-                return x.qty - shares if x.qty - shares != 0 else trades.remove(x)
+                return x.qty - qty if x.qty - qty != 0 else trades.remove(x)
 
             reduce_qty(first_in)
             reduce_qty(first_out)
 
-        return profits
+        return pd.DataFrame({'Type': trade_type,
+                             'Open': opens,
+                             'Close': closes,
+                             'Qty': shares,
+                             'Profit': profits,
+                             '% G/L': pct_change,
+                             'Start Date': start_date,
+                             'End Date': end_date,
+                             'Time Delta': time_delta})
 
     def show_charts(self, metric):
         plt.plot(metric)
@@ -578,41 +625,48 @@ class Quant(object):
     def analysis(self):
         # provides basic metrics on strategy in dataframe form
 
-        profits = pd.Series([x['Profit'] for x in self.calc_profits()], name='Profit')
+        profits = self.show_trades()['Profit']
         winners = profits[lambda x: x > 0]
         losers = profits[lambda x: x < 0]
 
-        win_rate = winners.count() / len(profits)
+        win_rate = winners.count() / profits.count()
         gross_profit = winners.sum()
         gross_loss = losers.sum()
         net_pnl = gross_profit + gross_loss
-        pct_gain = self.running_pct_chnge[-1]
+        pct_gain = self.running_pct_change.iloc[-1]
         avg_win = winners.mean()
         avg_loss = losers.mean()
         largest_gain = winners.max()
         largest_loss = losers.min()
         expectancy = (avg_win * win_rate) - (avg_loss * (1 - win_rate))
+        avg_win_loss = avg_win / abs(avg_loss)
         profit_factor = (gross_profit / abs(gross_loss)) if gross_loss != 0 else 'N/A'
         max_drawdown = min(self.drawdown[1:])
-        sharpe = pd.Series(self.returns).mean() / pd.Series(self.returns).std()
-        sortino = pd.Series(self.returns).mean() / np.sqrt(pd.Series(self.returns).apply(lambda x: x ** 2 if x < 0 else 0)).mean()
+        sharpe = self.returns.mean() / self.returns.std()
+        sortino = self.returns.mean() / np.sqrt(self.returns.apply(lambda x: x ** 2 if x < 0 else 0)).mean()
 
         return pd.Series({'Ticker': self.ticker,
-                          'Gross Profit': f'${round(gross_profit, 2)}',
-                          'Gross Loss': f'${round(gross_loss, 2)}',
-                          'Net PnL': f'${round(net_pnl, 2)}',
-                          '% G/L': f'{round(pct_gain * 100, 2)}%',
-                          '# of Trades': profits.count(),
-                          'Win Rate': f'{round(win_rate * 100, 2)}%',
-                          'Average Win': f'${round(avg_win, 2)}',
-                          'Average Loss': f'${round(avg_loss, 2)}',
-                          'Largest Win': f'${round(largest_gain, 2)}',
-                          'Largest Loss': f'${round(largest_loss, 2)}',
-                          'Expectancy': f'${round(expectancy, 2)}',
-                          'Profit Factor': f'{round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor}',
-                          'Maximum Drawdown': f'{round(max_drawdown * 100, 2)}%',
+                          'Starting Capital': self.initial_capital,
+                          'Ending Capital': round(self.current(self.balance), 2),
+                          'ROI (%)': round(pct_gain * 100, 2),
+                          'Gross Profit': round(gross_profit, 2),
+                          'Gross Loss': round(gross_loss, 2),
+                          'Net PnL': round(net_pnl, 2),
+                          'Profit Factor': round(profit_factor, 2),
+                          'Maximum Drawdown (%)': round(max_drawdown * 100, 2),
                           'Sharpe Ratio': round(sharpe, 2),
-                          'Sortino Ratio': round(sortino, 2)})
+                          'Sortino Ratio': round(sortino, 2),
+                          '# of Trades': profits.count(),
+                          'Win Rate (%)': round(win_rate * 100, 2),
+                          '# of Winning Trades': len(winners),
+                          '# of losing Trades': len(losers),
+                          '# of Even Trades': profits.count() - len(losers) - len(winners),
+                          'Average Win': round(avg_win, 2),
+                          'Largest Win': round(largest_gain, 2),
+                          'Average Loss': round(avg_loss, 2),
+                          'Largest Loss': round(largest_loss, 2),
+                          'Expectancy': round(expectancy, 2),
+                          'Avg Win-Loss Ratio': round(avg_win_loss, 2)})
 
 
 def double_sma_crossover(quant):
@@ -628,13 +682,17 @@ def double_sma_crossover(quant):
         quant.tick_update(i)
 
         # the next step is to create the criteria for when your orders will execute
-        # in this basic strategy, we want to buy stock when the fast simple mov avg crosses over the slow sma, and sell when the opposite occurs
+        # in this basic strategy, we want to buy stock when the fast simple mov avg crosses over the slow sma, and short when the opposite occurs
         buy_criteria = quant.crossover(fast_sma, slow_sma)
         sell_criteria = quant.crossover(slow_sma, fast_sma)
 
-        # enter orders using entry
         quant.entry(2, when=buy_criteria)
         quant.entry(2, buy=False, when=sell_criteria)
+
+        if quant.shares_owned != 0:
+
+            quant.entry(2, when=buy_criteria)
+            quant.entry(2, buy=False, when=sell_criteria)
 
         # use process orders to see if the orders meet the criteria to be executed
         # Because these are simple market orders, they will be executed right away
@@ -644,7 +702,8 @@ def double_sma_crossover(quant):
     return quant.get_results()
 
 
-q = Quant('MSFT')
-double_sma_crossover(q)
+q = Quant('MSFT', play_by_play=True)
+tearsheet = double_sma_crossover(q)
+print(q.show_trades)
 print()
 print(q.analysis())
